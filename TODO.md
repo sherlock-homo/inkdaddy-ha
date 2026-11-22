@@ -52,6 +52,8 @@
 - Native Linux ARM64 smoke runs of dev.18 and dev.19 verified the hash-locked Python environment, frontend build, private Matter socket, managed Ingress, five-slot playback, and authenticated loopback CASE/BDX. Dev.19 also passed 21 targeted color, clock, and sensor picker tests in the offline guest. An App Store install on an ARM64 Home Assistant OS host remains to be verified.
 - The dev.19 App Store image passed 169 Python tests and six controller tests. The packaged frontend passed the desktop and mobile browser workflows, and Gitleaks found no secrets in the built application files.
 - An amd64 App Store update preserved the existing Matter binding and five upcoming frames. Every upcoming photo matched the color-managed digest, and the physical panel confirmed the corrected current photo on a same-photo refresh.
+- The running dev.19 App Store build offered its prepared photo 0.38 seconds after the hour and received the matching Matter receipt 42.8 seconds after the hour. A camera check confirmed the physical change. Five future slots stayed prepared.
+- On the physical frame, the native Home Assistant Matter controls passed Pause, Next, Previous, Refresh, and Play. Refresh received a new transfer receipt for the same photo bytes. Playback resumed at the original photo with the original upcoming order.
 
 ## First public app release
 
