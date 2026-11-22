@@ -52,10 +52,11 @@ def _asset_entry(
         yield (parent, parts[-1]) if parent is not None else None
 
 
-def asset_names(data_dir: Path, directory: str, child: str) -> list[str]:
-    if child in ("", ".", "..") or Path(child).name != child:
+def asset_names(data_dir: Path, directory: str, child: str | None = None) -> list[str]:
+    if child is not None and (child in ("", ".", "..") or Path(child).name != child):
         return []
-    with _asset_directory(data_dir.absolute(), (directory, child)) as parent:
+    parts = (directory,) if child is None else (directory, child)
+    with _asset_directory(data_dir.absolute(), parts) as parent:
         return os.listdir(parent) if parent is not None else []
 
 
@@ -99,14 +100,18 @@ def read_asset(
         return None
 
 
-def remove_asset(data_dir: Path, directory: str, value: str | Path | None) -> None:
+def remove_asset(
+    data_dir: Path, directory: str, value: str | Path | None, *, older_than: float | None = None
+) -> None:
     with _asset_entry(data_dir, directory, value) as entry:
         if entry is None:
             return
         parent, name = entry
         try:
             metadata = os.stat(name, dir_fd=parent, follow_symlinks=False)
-            if stat.S_ISREG(metadata.st_mode):
+            if stat.S_ISREG(metadata.st_mode) and (
+                older_than is None or max(metadata.st_mtime, metadata.st_ctime) < older_than
+            ):
                 os.unlink(name, dir_fd=parent)
         except FileNotFoundError:
             pass

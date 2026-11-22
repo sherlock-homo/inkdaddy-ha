@@ -23,7 +23,7 @@ WIDGET_FOOTPRINTS: dict[str, set[tuple[int, int]]] = {
     "line_chart": {(2, 1), (2, 2), (4, 1)},
     "bar_chart": {(2, 1), (2, 2), (4, 1)},
     "donut_chart": {(1, 1), (2, 2)},
-    "agenda": {(2, 2), (4, 1), (4, 2)},
+    "agenda": {(2, 1), (2, 2), (4, 1), (4, 2)},
     "weather_summary": {(2, 1), (2, 2), (4, 1)},
     "text_note": {(1, 1), (2, 1), (2, 2), (4, 1), (4, 2)},
     "photo_tile": {(1, 1), (2, 1), (2, 2), (4, 2)},

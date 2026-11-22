@@ -52,11 +52,35 @@ function DeviceCard({ device, refreshing, onOpenDisplay, onRename }: {
   const [historyError, setHistoryError] = useState("");
   const [renameMessage, setRenameMessage] = useState("");
   const [renameError, setRenameError] = useState("");
+  const [interval, setInterval] = useState<string | null>(null);
+  const [savingInterval, setSavingInterval] = useState(false);
+  const [intervalMessage, setIntervalMessage] = useState("");
+  const [intervalError, setIntervalError] = useState("");
   const route = `/api/devices/${encodeURIComponent(device.device_uid)}`;
+  const minutes = Number(interval ?? device.refresh_interval_minutes);
+
+  async function saveInterval(event: FormEvent) {
+    event.preventDefault();
+    if (!Number.isInteger(minutes) || minutes < 10 || minutes > 3600 || refreshing || savingInterval || saving) return;
+    setSavingInterval(true);
+    setIntervalMessage("");
+    setIntervalError("");
+    try {
+      onRename(await apiJson<DeviceRecord>(route, {
+        method: "PUT", body: JSON.stringify({ refresh_interval_minutes: minutes }),
+      }));
+      setInterval(null);
+      setIntervalMessage("Refresh interval saved.");
+    } catch {
+      setIntervalError("Unable to save the refresh interval.");
+    } finally {
+      setSavingInterval(false);
+    }
+  }
 
   async function rename(event: FormEvent) {
     event.preventDefault();
-    if (!name?.trim() || refreshing || saving) return;
+    if (!name?.trim() || refreshing || saving || savingInterval) return;
     setSaving(true);
     setRenameError("");
     setRenameMessage("");
@@ -106,6 +130,21 @@ function DeviceCard({ device, refreshing, onOpenDisplay, onRename }: {
     </form>}
     {renameMessage && <p role="status">{renameMessage}</p>}
     {renameError && <p className="warning-text" role="alert">{renameError}</p>}
+    <form className="form-stack" onSubmit={(event) => void saveInterval(event)}>
+      <label>Refresh interval (minutes)
+        <input type="number" required min={10} max={3600} step={1} disabled={savingInterval}
+          value={interval ?? device.refresh_interval_minutes}
+          onChange={(event) => { setInterval(event.target.value); setIntervalMessage(""); }} />
+      </label>
+      {minutes >= 10 && minutes < 15 && <p className="warning-text">Frequent updates use more battery.</p>}
+      <div className="button-row">
+        <button className="secondary-button" disabled={savingInterval || saving || refreshing || !Number.isInteger(minutes) || minutes < 10 || minutes > 3600 || minutes === device.refresh_interval_minutes}>
+          {savingInterval ? "Saving interval…" : "Save interval"}
+        </button>
+      </div>
+    </form>
+    {intervalMessage && <p role="status">{intervalMessage}</p>}
+    {intervalError && <p role="alert">{intervalError}</p>}
     <details onToggle={(event) => {
       if (event.currentTarget.open && history === null && !loadingHistory && !historyError) void loadHistory();
     }}>

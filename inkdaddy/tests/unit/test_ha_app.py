@@ -227,12 +227,15 @@ def test_entity_cache_schema_migrates_existing_rows_idempotently(monkeypatch):
 
 def test_playback_clock_schema_migrates_existing_rows_idempotently(monkeypatch):
     from inkdaddy_hub import database
-    from inkdaddy_hub.models import Playback, PlaybackSlot
+    from inkdaddy_hub.models import Playback, PlaybackOffer, PlaybackSlot
 
     engine = create_engine("sqlite://")
     Base.metadata.create_all(engine)
     with engine.begin() as connection:
-        connection.exec_driver_sql("ALTER TABLE playback DROP COLUMN manual_request_hour")
+        connection.exec_driver_sql("ALTER TABLE playback RENAME COLUMN anchor_minute TO anchor_hour")
+        connection.exec_driver_sql("ALTER TABLE playback DROP COLUMN manual_request_minute")
+        connection.exec_driver_sql("ALTER TABLE playback_slots RENAME COLUMN scheduled_minute TO hour")
+        connection.exec_driver_sql("ALTER TABLE playback_offers RENAME COLUMN scheduled_minute TO hour")
         connection.exec_driver_sql("ALTER TABLE playback DROP COLUMN manual_requested_at")
         connection.exec_driver_sql("ALTER TABLE playback_slots DROP COLUMN manual_observed_at")
         connection.exec_driver_sql(
@@ -243,14 +246,20 @@ def test_playback_clock_schema_migrates_existing_rows_idempotently(monkeypatch):
             "INSERT INTO playback_slots (device_id, hour, source_type, source_id, title, frame_id, render_key) "
             "VALUES (1, 7, 'dashboard', 'sample', 'Home Overview', 'old-frame', 'old-render')"
         )
+        connection.exec_driver_sql(
+            "INSERT INTO playback_offers (id, device_id, hour, source_type, source_id, title, frame_id, offered_at) "
+            "VALUES (3, 1, 7, 'dashboard', 'sample', 'Home Overview', 'old-frame', '2026-11-18T07:00:05')"
+        )
+        connection.exec_driver_sql("UPDATE playback SET current_offer_id = 3 WHERE device_id = 1")
     monkeypatch.setattr(database, "engine", engine)
     database.init_db()
     database.init_db()
     with Session(engine) as db:
         state = db.get(Playback, 1)
-        slot = db.get(PlaybackSlot, (1, 7))
-        assert state.paused and (state.anchor_hour, state.anchor_position) == (7, 2)
-        assert state.manual_request_hour is state.manual_requested_at is None
+        slot = db.get(PlaybackSlot, (1, 420))
+        assert state.paused and (state.anchor_minute, state.anchor_position) == (420, 2)
+        assert state.manual_request_minute is state.manual_requested_at is None
+        assert db.get(PlaybackOffer, state.current_offer_id).scheduled_minute == 420
         assert (slot.frame_id, slot.render_key) == ("old-frame", "old-render")
         assert slot.manual_observed_at is None
     engine.dispose()

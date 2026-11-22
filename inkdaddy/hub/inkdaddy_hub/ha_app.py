@@ -20,6 +20,7 @@ MATTER_EXECUTABLE = Path("/opt/inkdaddy/matter_controller/src/server.mjs")
 READ_METHODS = {"GET", "HEAD", "OPTIONS"}
 REQUEST_MARKER = (b"x-inkdaddy-request", b"1")
 MIB = 1024 * 1024
+APP_OPTIONS_PATH = Path("/data/options.json")
 
 
 async def ingress_only(
@@ -140,6 +141,22 @@ def ingress_host() -> str:
         return route.getsockname()[0]
 
 
+def load_integration_relay_options(path: Path = APP_OPTIONS_PATH) -> None:
+    try:
+        options = json.loads(path.read_text())
+    except (OSError, ValueError):
+        return
+    if not isinstance(options, dict):
+        return
+    for option, variable in (
+        ("integration_relay_url", "INKDADDY_INTEGRATION_RELAY_URL"),
+        ("integration_relay_token", "INKDADDY_INTEGRATION_RELAY_TOKEN"),
+    ):
+        value = options.get(option)
+        if isinstance(value, str) and value and "\0" not in value:
+            os.environ[variable] = value
+
+
 def _maintain_matter_server(environment: dict[str, str], stop: threading.Event) -> None:
     socket_path = Path(environment["INKDADDY_MATTER_SOCKET"])
     while not stop.is_set():
@@ -214,6 +231,7 @@ def main() -> None:
     os.umask(0o077)
     require_ingress_authorization(token)
     port = ingress_port(token)
+    load_integration_relay_options()
 
     with managed_matter():
         from .main import app

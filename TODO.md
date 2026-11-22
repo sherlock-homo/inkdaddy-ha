@@ -1,5 +1,16 @@
 # inkDaddy Home Assistant repository checklist
 
+## Photo playback customization
+
+- [x] Add Intelligent Crop and an editor for existing photos. Preserve the original and previous processed, preview, and raw versions.
+- [x] Build reusable photo overlays for each display, including Home Assistant sensors, date, and opt-in upcoming calendar details.
+- [x] Make the refresh interval configurable per display. Preserve installed playback state, confirmed frames, and the five-frame queue.
+- [x] Add anonymous integration requests and a private relay with a durable queue. Provide a Mac mini workflow for development and independent review.
+- [x] Exercise an upgrade from the existing app, test the photo and overlay editor in the browser, verify the schedule and integration request flow, and review the release contents for sensitive data.
+- [ ] Verify delivery and Mac mini pickup against an owner-configured HTTPS relay and run an approved request in the isolated Codex environment.
+
+The dev.20 local suite passed 208 Python tests, including authenticated loopback Matter delivery at a shortened interval, and six controller tests. The amd64 Home Assistant package passed 207 Python tests and six controller tests. The Mac mini runner’s Git test passed on the Mac. The packaged migration from dev.19 preserved the original photo digest, the confirmed transfer, and five scheduled frames. Chromium verified the 390–393 px photo, overlay, interval, and request workflows. The reviews covered cadence changes, exact bitmap recovery, relay data and acknowledgment, and the Mac mini runner’s Git and sandbox isolation. Gitleaks found no secrets in the source, reachable history, or packaged application files. Bandit reported no medium or high findings.
+
 ## V1 release and bench acceptance
 
 ### Home Assistant installation and migration

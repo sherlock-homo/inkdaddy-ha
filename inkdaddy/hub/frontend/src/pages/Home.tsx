@@ -11,8 +11,8 @@ const actionMessages: Record<PlaybackAction, string> = {
   previous_content: "Previous item selected.",
   next_content: "Next item selected.",
   refresh_current: "Refresh requested.",
-  pause: "Hourly slideshow paused.",
-  play: "Hourly slideshow resumed."
+  pause: "Slideshow paused.",
+  play: "Slideshow resumed."
 };
 
 export function Home({ onConnect, preferredUid, onDisplaySelected, playlistSource, onPlaylistSourceUsed }: {
@@ -241,7 +241,7 @@ export function Home({ onConnect, preferredUid, onDisplaySelected, playlistSourc
               <div className="preview-toolbar upcoming-header">
                 <div>
                   <h2 id="upcoming-title">Up next</h2>
-                  <p>{playback?.paused ? "Hourly schedule paused" : "Next five scheduled frames"}</p>
+                  <p>{playback?.paused ? "Slideshow paused" : `Refreshes every ${display?.refresh_interval_minutes ?? 60} minutes`}</p>
                 </div>
                 <button className="secondary-button" disabled={busy || savingPlaylist || !playback} onClick={togglePlaylist}>
                   {editingQueue ? "Close editor" : "Edit playlist"}

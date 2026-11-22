@@ -11,8 +11,9 @@ from sqlalchemy import select
 
 from .config import get_settings
 from .database import SessionLocal, init_db
-from .models import Device, Setting
-from .services.dashboard_content import SITE_SETTING
+from .models import Dashboard, Device, Playback, Setting
+from .services.dashboard_calendar import calendar_connection, calendar_requests, refresh_calendar_cache
+from .services.dashboard_content import SITE_SETTING, dashboard_config
 from .services import home_assistant
 from .services.playback import begin_playback_write, prune_playback, refresh_playback_slots
 from .services.updates import run_auto_update_cycle
@@ -48,6 +49,24 @@ def refresh_home_assistant() -> None:
             else:
                 db.add(Setting(key=SITE_SETTING, value_json=json.dumps(site_data)))
         db.commit()
+    refresh_dashboard_calendars()
+
+
+def refresh_dashboard_calendars() -> None:
+    with SessionLocal() as db:
+        devices = db.scalars(select(Device).where(Device.provisioned.is_(True))).all()
+        selected = {
+            device.selected_source_id or "sample" for device in devices if device.selected_source_type == "dashboard"
+        }
+        selected.update(device.overlay_dashboard_id for device in devices if device.overlay_dashboard_id)
+        for playlist in db.scalars(select(Playback.playlist_json).where(
+            Playback.device_id.in_(device.id for device in devices)
+        )):
+            selected.update(item["id"] for item in json.loads(playlist) if item["type"] == "dashboard")
+        layouts = db.scalars(select(Dashboard).where(Dashboard.slug.in_(selected)))
+        requests = {request for layout in layouts for request in calendar_requests(dashboard_config(layout))}
+        connection, scope = calendar_connection(db) if requests else (None, None)
+    refresh_calendar_cache(connection, scope, requests, datetime.now(timezone.utc))
 
 
 def run_playback_cycle(now: datetime | None = None) -> None:
@@ -64,7 +83,7 @@ def run_playback_cycle(now: datetime | None = None) -> None:
                     db.commit()
                 except (OSError, ValueError):
                     LOGGER.exception(
-                        "Could not prepare the hourly queue for display %s.", device_id
+                        "Could not prepare the scheduled queue for display %s.", device_id
                     )
     with SessionLocal() as db:
         begin_playback_write(db)
@@ -84,6 +103,7 @@ def run(stop_event: threading.Event, *, refresh_at_start: bool = True) -> None:
         if now - last_ha_refresh >= HA_REFRESH_SECONDS:
             last_ha_refresh = now
             refresh_home_assistant()
+        refresh_dashboard_calendars()
         run_playback_cycle()
         if now - last_update_check >= interval:
             last_update_check = now

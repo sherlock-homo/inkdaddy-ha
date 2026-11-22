@@ -5,11 +5,14 @@ from datetime import datetime, timezone
 from typing import Any
 
 from fastapi import APIRouter, Depends, HTTPException, Response
+from PIL import Image
+from pydantic import BaseModel, Field
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
+from ..config import get_settings
 from ..database import get_db
-from ..models import Dashboard, Device
+from ..models import Dashboard, Device, Photo
 from ..services.dashboard import (
     DashboardValidationError,
     SAMPLE_DASHBOARD,
@@ -17,15 +20,28 @@ from ..services.dashboard import (
     validate_dashboard_config,
 )
 from ..services.dashboard_content import (
+    PhotoOverlay,
     dashboard_config,
     get_dashboard_record,
     render_dashboard,
     resolve_widget_text,
 )
+from ..services.dashboard_calendar import calendar_connection, calendar_requests, refresh_calendar_cache
+from ..services.photos import load_color_managed_photo
 from ..services.playback import begin_playback_write, playlist_uses_dashboard
 from ..services.rendering import render_preview_png_bytes
 
 router = APIRouter(prefix="/api/dashboards", tags=["dashboards"])
+
+
+class PhotoOverlayAssignment(BaseModel):
+    dashboard_id: str | None = Field(max_length=128)
+
+
+class DashboardPreviewRequest(BaseModel):
+    yaml: str | None = None
+    device_uid: str | None = Field(default=None, max_length=128)
+    photo_id: int | None = Field(default=None, gt=0, le=2**63 - 1)
 
 
 def _parse(raw_yaml: str) -> dict[str, Any]:
@@ -88,9 +104,34 @@ def import_dashboard(
 
 
 @router.post("/preview")
-def preview_unsaved(payload: dict[str, object], db: Session = Depends(get_db)) -> Response:
-    config = _parse(str(payload.get("yaml") or SAMPLE_DASHBOARD))
-    return _preview(db, config, str(payload["device_uid"]) if payload.get("device_uid") else None)
+def preview_unsaved(payload: DashboardPreviewRequest, db: Session = Depends(get_db)) -> Response:
+    config = _parse(payload.yaml or SAMPLE_DASHBOARD)
+    return _preview(db, config, payload.device_uid, payload.photo_id)
+
+
+@router.get("/photo-overlays")
+def list_photo_overlays(db: Session = Depends(get_db)) -> dict[str, object]:
+    devices = db.scalars(select(Device).order_by(Device.name, Device.device_uid))
+    return {"overlays": [
+        {"device_uid": device.device_uid, "dashboard_id": device.overlay_dashboard_id} for device in devices
+    ]}
+
+
+@router.put("/photo-overlays/{device_uid}")
+def set_photo_overlay(
+    device_uid: str, payload: PhotoOverlayAssignment, db: Session = Depends(get_db),
+) -> dict[str, str | None]:
+    begin_playback_write(db)
+    device = db.scalar(select(Device).where(Device.device_uid == device_uid))
+    if device is None:
+        raise HTTPException(status_code=404, detail="Display not found.")
+    if payload.dashboard_id is not None:
+        config = dashboard_config(_find(db, payload.dashboard_id))
+        if not config["widgets"]:
+            raise HTTPException(status_code=422, detail="Add a widget to this dashboard before using it over photos.")
+    device.overlay_dashboard_id = payload.dashboard_id
+    db.commit()
+    return {"device_uid": device.device_uid, "dashboard_id": device.overlay_dashboard_id}
 
 
 @router.get("/{dashboard_id}")
@@ -127,7 +168,8 @@ def delete_dashboard(dashboard_id: str, db: Session = Depends(get_db)) -> dict[s
         )
         .limit(1)
     )
-    if dashboard_id == "sample" or device_uses or playlist_uses_dashboard(db, dashboard_id):
+    overlay_uses = db.scalar(select(Device.id).where(Device.overlay_dashboard_id == dashboard_id).limit(1))
+    if dashboard_id == "sample" or device_uses or overlay_uses or playlist_uses_dashboard(db, dashboard_id):
         raise HTTPException(status_code=409, detail="This dashboard is in use.")
     record = _find(db, dashboard_id)
     db.delete(record)
@@ -144,13 +186,29 @@ def preview_dashboard(
     return _preview(db, config, device_uid)
 
 
-def _preview(db: Session, config: dict[str, Any], device_uid: str | None) -> Response:
+def _preview(db: Session, config: dict[str, Any], device_uid: str | None, photo_id: int | None = None) -> Response:
     device = (
         db.scalar(select(Device).where(Device.device_uid == device_uid)) if device_uid else None
     )
-    widgets = resolve_widget_text(db, config, datetime.now(timezone.utc), device, time_kind="preview")
+    image = None
+    if photo_id is not None:
+        photo = db.get(Photo, photo_id)
+        image = (
+            load_color_managed_photo(get_settings().data_dir, photo.processed_path, photo.original_path)
+            if photo and photo.processed_status == "ready" else None
+        )
+        if image is None:
+            raise HTTPException(status_code=404, detail="Photo preview unavailable.")
+        if image.size != (800, 480):
+            image = image.resize((800, 480), Image.Resampling.LANCZOS)
+    now = datetime.now(timezone.utc)
+    if requests := calendar_requests(config):
+        connection, scope = calendar_connection(db)
+        refresh_calendar_cache(connection, scope, requests, now)
+    widgets = resolve_widget_text(db, config, now, device, time_kind="preview")
+    image = PhotoOverlay(config, widgets).render(image) if image else render_dashboard(config, widgets)
     return Response(
-        content=render_preview_png_bytes(render_dashboard(config, widgets)), media_type="image/png"
+        content=render_preview_png_bytes(image), media_type="image/png", headers={"Cache-Control": "no-store"},
     )
 
 

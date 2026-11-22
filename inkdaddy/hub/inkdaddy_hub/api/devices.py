@@ -35,11 +35,14 @@ from ..services.playback import (
     refresh_playback_slots,
     reset_selection,
     update_playlist,
+    update_refresh_interval,
 )
 from ..services.rendering import render_preview_png_bytes
 
 router = APIRouter(prefix="/api/devices", tags=["devices"])
-MANAGED_DEVICE_FIELDS = frozenset({"name", "selected_source_type", "selected_source_id"})
+MANAGED_DEVICE_FIELDS = frozenset({
+    "name", "selected_source_type", "selected_source_id", "refresh_interval_minutes",
+})
 
 
 def require_standalone_device_api() -> None:
@@ -82,6 +85,7 @@ def _get_device(db: Session, device_id: str) -> Device:
 
 
 def create_or_update_device(db: Session, payload: dict[str, object]) -> Device:
+    begin_playback_write(db)
     device_uid = str(payload.get("device_uid") or payload.get("id") or f"display-{uuid_suffix(db)}")
     device = db.scalar(select(Device).where(Device.device_uid == device_uid))
     if not device:
@@ -93,7 +97,7 @@ def create_or_update_device(db: Session, payload: dict[str, object]) -> Device:
             selected_source_id=str(payload.get("selected_source_id") or "sample"),
         )
         db.add(device)
-    _apply_device_payload(device, payload)
+    _apply_device_payload(db, device, payload)
     db.commit()
     db.refresh(device)
     return device
@@ -103,7 +107,7 @@ def uuid_suffix(db: Session) -> int:
     return int(db.scalar(select(func.count()).select_from(Device)) or 0) + 1
 
 
-def _apply_device_payload(device: Device, payload: dict[str, object]) -> None:
+def _apply_device_payload(db: Session, device: Device, payload: dict[str, object]) -> None:
     string_fields = ("name", "hardware_target", "firmware_version", "hardware_version", "selected_source_type", "selected_source_id")
     bool_fields = ("provisioned", "mesh_connected")
     float_fields = ("battery_percent", "battery_voltage")
@@ -116,9 +120,21 @@ def _apply_device_payload(device: Device, payload: dict[str, object]) -> None:
     for key in float_fields:
         if key in payload and payload[key] is not None:
             setattr(device, key, float(payload[key]))
-    if "refresh_interval_minutes" in payload and payload["refresh_interval_minutes"] is not None:
-        minutes = int(payload["refresh_interval_minutes"])
-        device.refresh_interval_minutes = max(10, min(3600, minutes))
+    interval = _interval_from_payload(payload)
+    if interval is not None:
+        if device.id is None:
+            device.refresh_interval_minutes = interval
+        else:
+            update_refresh_interval(db, device, interval)
+
+
+def _interval_from_payload(payload: dict[str, object]) -> int | None:
+    interval = payload.get("refresh_interval_minutes")
+    if interval is None:
+        return None
+    if type(interval) is not int or not 10 <= interval <= 3600:
+        raise HTTPException(status_code=422, detail="Enter a refresh interval from 10 to 3600 whole minutes.")
+    return interval
 
 
 @router.get("")
@@ -141,7 +157,7 @@ def get_device(device_id: str, db: Session = Depends(get_db)) -> dict[str, objec
 @router.put("/{device_id}")
 def update_device(device_id: str, payload: dict[str, object], db: Session = Depends(get_db)) -> dict[str, object]:
     if supervisor_connection() is not None and set(payload) - MANAGED_DEVICE_FIELDS:
-        raise HTTPException(status_code=422, detail="Only the display name and content source can be edited here.")
+        raise HTTPException(status_code=422, detail="Edit the display name, content source, or refresh interval here.")
     begin_playback_write(db)
     device = _get_device(db, device_id)
     previous_selection = (device.selected_source_type, device.selected_source_id)
@@ -149,9 +165,12 @@ def update_device(device_id: str, payload: dict[str, object], db: Session = Depe
         if not isinstance(name, str) or not name.strip() or len(name.strip()) > 255:
             raise HTTPException(status_code=422, detail="Enter a display name between 1 and 255 characters.")
         payload = {**payload, "name": name.strip()}
-    _apply_device_payload(device, payload)
+    previous_interval = device.refresh_interval_minutes
+    _apply_device_payload(db, device, payload)
     if previous_selection != (device.selected_source_type, device.selected_source_id):
         reset_selection(db, device)
+    if device.provisioned and device.refresh_interval_minutes != previous_interval:
+        refresh_playback_slots(db, device)
     db.commit()
     db.refresh(device)
     return _device_payload(device)
@@ -180,7 +199,7 @@ def heartbeat(device_id: str, payload: dict[str, object], db: Session = Depends(
     device = _get_device(db, device_id)
     if db.get(MatterFrameBinding, device.id) is not None:
         raise HTTPException(status_code=409, detail="This display reports through Matter.")
-    _apply_device_payload(device, payload)
+    _apply_device_payload(db, device, payload)
     if "last_frame_id" in payload:
         device.last_frame_id = str(payload["last_frame_id"])
     device.last_seen_at = datetime.utcnow()

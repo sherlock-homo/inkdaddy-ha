@@ -1,22 +1,29 @@
 from __future__ import annotations
 
 import asyncio
+from concurrent.futures import ThreadPoolExecutor
+from datetime import datetime, timedelta, timezone
 from io import BytesIO
+from os import utime
 from pathlib import Path
+from threading import Barrier
+from uuid import uuid4
 
 import pytest
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
-from PIL import Image, ImageCms, ImageOps, PngImagePlugin
+from PIL import Image, ImageCms, ImageDraw, ImageOps, PngImagePlugin
 from sqlalchemy import create_engine, select
 from sqlalchemy.orm import Session
 
 from inkdaddy_hub.api import photos as photos_api
 from inkdaddy_hub.config import HubSettings
 from inkdaddy_hub.database import Base, get_db
-from inkdaddy_hub.models import Photo
-from inkdaddy_hub.services import photos
+from inkdaddy_hub.models import Device, Frame, Photo, PhotoRevision, Setting
+from inkdaddy_hub.services import photos, playback
+from inkdaddy_hub.services.matter_frame_broker import prepare_matter_frame, record_matter_frame_receipt
 from inkdaddy_hub.services.palette import raw_frame_from_image, raw_photo_frame
+from inkdaddy_hub.services.photo_framing import PhotoFraming, frame_photo
 
 
 def raster(format="PNG", *, size=(4, 3)):
@@ -109,6 +116,138 @@ def test_uploaded_photo_frame_uses_the_photo_renderer(photo_app):
     assert downloaded.content == expected
     assert len(downloaded.content) == 192_000
     assert metadata["checksum"] == digest
+
+
+def _off_center_fixture() -> Image.Image:
+    image = Image.new("RGB", (1600, 480), (128, 128, 128))
+    draw = ImageDraw.Draw(image)
+    draw.ellipse((1260, 70, 1510, 410), fill=(246, 35, 18))
+    draw.ellipse((1340, 155, 1430, 245), fill=(38, 25, 19))
+    return image
+
+
+def test_intelligent_crop_keeps_off_center_detail_and_centers_uniform_photos():
+    image = _off_center_fixture()
+    centered, center = frame_photo(image, (800, 480), PhotoFraming("fill"))
+    automatic, focus = frame_photo(image, (800, 480), PhotoFraming("intelligent"))
+    manual, manual_focus = frame_photo(image, (800, 480), PhotoFraming("fill", 1, 0.5))
+    assert center == (0.5, 0.5)
+    assert 0.68 < focus[0] <= 0.75 and focus[1] == 0.5
+    assert automatic.size == centered.size == (800, 480)
+    assert max(centered.getchannel("R").getextrema()) == 128
+    assert max(automatic.getchannel("R").getextrema()) >= 246
+    assert manual_focus == (0.75, 0.5) and max(manual.getchannel("R").getextrema()) >= 246
+    _frame, uniform = frame_photo(Image.new("RGB", (1600, 480)), (800, 480), PhotoFraming("intelligent"))
+    assert uniform == (0.5, 0.5)
+
+
+def test_legacy_photo_crop_edit_keeps_original_and_previous_derivatives(photo_app, tmp_path, monkeypatch):
+    client, engine = photo_app
+    monkeypatch.setattr(playback, "get_settings", lambda: HubSettings(data_dir=tmp_path))
+    with BytesIO() as output:
+        _off_center_fixture().save(output, format="PNG", icc_profile=_DISPLAY_P3.read_bytes())
+        original = output.getvalue()
+    upload = client.post("/api/photos", files={"file": ("synthetic.png", original, "image/png")})
+    assert upload.status_code == 200
+    initial = upload.json()
+    photo_id = int(initial["id"])
+    base = f"/api/photos/{photo_id}"
+    before_preview = client.get(initial["preview_url"]).content
+    before_frame = client.get(initial["frame_url"]).content
+    scheduled_at = datetime(2026, 11, 22, 21, tzinfo=timezone.utc)
+    device_uid = "synthetic-crop-frame"
+    with Session(engine) as db:
+        photo = db.get(Photo, photo_id)
+        photo.framing_json = None  # Existing photos have no known framing settings.
+        original_path = Path(photo.original_path)
+        db.commit()
+        device = Device(device_uid=device_uid, name="Synthetic frame", selected_source_type="photo")
+        db.add(device)
+        db.flush()
+        offered = prepare_matter_frame(db, device_uid, now=scheduled_at)
+        assert record_matter_frame_receipt(
+            db, device_uid, transfer_id=offered.transfer_id, frame_id=offered.frame_id,
+            result="ok", now=scheduled_at,
+        )
+        db.commit()
+    draft = client.get(f"{base}/framing-preview", params={"mode": "intelligent"})
+    assert draft.status_code == 200
+    assert float(draft.headers["X-InkDaddy-Focus-X"]) > 0.68
+    assert client.get(initial["preview_url"]).content == before_preview
+    invalid = client.put(f"{base}/framing", json={
+        "mode": "fill", "zoom": 4, "revision": initial["revision"],
+    })
+    assert invalid.status_code == 422
+    saved = client.put(f"{base}/framing", json={"mode": "intelligent", "revision": initial["revision"]})
+    assert saved.status_code == 200
+    updated = saved.json()
+    assert updated["id"] == initial["id"] and updated["revision"] != initial["revision"]
+    assert updated["framing"] == {"mode": "intelligent", "x": None, "y": None, "zoom": 1.0}
+    assert client.get(updated["preview_url"]).content == draft.content
+    assert client.get(initial["preview_url"]).content == before_preview
+    assert client.get(initial["frame_url"]).content == before_frame
+    with Image.open(BytesIO(draft.content)) as image:
+        assert image.info == {"srgb": 1}
+        raw, digest = raw_photo_frame(image)
+    assert client.get(updated["frame_url"]).content == raw
+    assert updated["checksum"] == digest and len(raw) == 192_000
+    assert original_path.read_bytes() == original
+    assert client.put(f"{base}/framing", json={"mode": "fit", "revision": initial["revision"]}).status_code == 409
+    with Session(engine) as db:
+        record = db.scalar(select(PhotoRevision).where(PhotoRevision.photo_id == photo_id))
+        assert record is not None and record.checksum == initial["checksum"]
+        assert photos.load_color_managed_photo(tmp_path, record.processed_path, str(original_path)) is not None
+        active_frame = db.scalar(select(Frame).where(Frame.frame_id == offered.frame_id))
+        assert active_frame is not None
+        original_offer_path = Path(active_frame.path)
+        original_offer_path.unlink()
+        repaired = prepare_matter_frame(db, device_uid, now=scheduled_at, repair_cache=True)
+        assert repaired.transfer_id == offered.transfer_id and repaired.acknowledged
+        assert repaired.payload == offered.payload == original_offer_path.read_bytes()
+        next_offer = prepare_matter_frame(db, device_uid, now=scheduled_at + timedelta(hours=1))
+        assert next_offer.payload == raw and next_offer.transfer_id != offered.transfer_id
+        db.rollback()
+
+    assert client.delete(base).status_code == 200
+    assert not original_path.exists()
+    for directory in ("processed", "previews", "frames"):
+        assert not list((tmp_path / directory).glob("photo-*"))
+
+
+def test_framing_edit_rejects_a_racing_update_and_discards_its_staged_files(photo_app, tmp_path, monkeypatch):
+    client, engine = photo_app
+    initial = client.post("/api/photos", files={"file": ("synthetic.png", raster(), "image/png")}).json()
+    photo_id = int(initial["id"])
+    render = photos.process_photo_file
+    barrier = Barrier(2, timeout=5)
+
+    def stage_both(*args, **kwargs):
+        result = render(*args, **kwargs)
+        barrier.wait()
+        return result
+
+    monkeypatch.setattr(photos, "process_photo_file", stage_both)
+
+    def save(mode):
+        return client.put(f"/api/photos/{photo_id}/framing", json={"mode": mode, "revision": initial["revision"]})
+
+    with ThreadPoolExecutor(2) as executor:
+        results = list(executor.map(save, ("fill", "intelligent")))
+    assert sorted(item.status_code for item in results) == [200, 409]
+    with Session(engine) as db:
+        assert len(db.scalars(select(PhotoRevision)).all()) == 1
+    for directory in ("processed", "previews", "frames"):
+        assert len(list((tmp_path / directory).iterdir())) == 2
+
+
+def test_intelligent_crop_can_be_the_saved_upload_default(photo_app):
+    client, engine = photo_app
+    with Session(engine) as db:
+        db.add(Setting(key="photo_upload_mode", value_json='"intelligent"'))
+        db.commit()
+    uploaded = client.post("/api/photos", files={"file": ("tone.png", raster(), "image/png")})
+    assert uploaded.status_code == 200
+    assert uploaded.json()["framing"]["mode"] == "intelligent"
 
 
 # DisplayP3-v4.icc is CC0 from saucecontrol/Compact-ICC-Profiles.
@@ -392,3 +531,64 @@ def test_photo_delete_unlinks_only_owned_regular_files_and_allows_blank_placehol
     placeholder = _save_photo_metadata(engine)
     assert client.get(f"/api/photos/{placeholder}/preview").status_code == 404
     assert client.delete(f"/api/photos/{placeholder}").status_code == 200
+
+
+def test_photo_sweep_removes_only_aged_unreferenced_generated_derivatives(photo_app, tmp_path, monkeypatch):
+    _client, engine = photo_app
+    monkeypatch.setattr(playback, "get_settings", lambda: HubSettings(data_dir=tmp_path))
+    for directory in ("originals", "processed", "previews", "frames"):
+        (tmp_path / directory).mkdir()
+
+    def fixture(directory, extension):
+        path = tmp_path / directory / f"photo-{uuid4().hex}{extension}"
+        path.write_bytes(b"synthetic derivative")
+        return path
+
+    active = fixture("processed", ".png")
+    archive = fixture("previews", ".png")
+    frame_path = fixture("frames", ".raw")
+    interrupted = (
+        fixture("processed", ".png"), fixture("previews", ".png"), fixture("frames", ".raw")
+    )
+    fresh = fixture("previews", ".png")
+    untouched_original = fixture("originals", ".png")
+    legacy = tmp_path / "processed" / "photo-123.png"
+    legacy.write_bytes(b"legacy path")
+    wrong_extension = fixture("processed", ".raw")
+    directory_candidate = tmp_path / "processed" / f"photo-{uuid4().hex}.png"
+    directory_candidate.mkdir()
+    outside = tmp_path / "outside.png"
+    outside.write_bytes(b"external file")
+    symlink = tmp_path / "previews" / f"photo-{uuid4().hex}.png"
+    symlink.symlink_to(outside)
+
+    now = datetime.now(timezone.utc) + timedelta(days=2)
+    last_write = (now - timedelta(minutes=1)).timestamp()
+    utime(fresh, (last_write, last_write))
+    with Session(engine) as db:
+        photo = Photo(
+            original_filename="fixture.png", stored_filename="fixture.png",
+            original_path=str(untouched_original), processed_path=str(active),
+        )
+        db.add(photo)
+        db.flush()
+        db.add(PhotoRevision(photo_id=photo.id, preview_path=str(archive)))
+        db.add(Frame(
+            frame_id="a" * 24, sha256="a" * 64, source_type="device", source_id="fixture",
+            width=800, height=480, palette="waveshare_7color_6", size_bytes=192_000,
+            path=str(frame_path),
+        ))
+        db.commit()
+        playback.prune_playback(db, now=now - timedelta(days=2))
+        db.commit()
+        assert all(path.exists() for path in interrupted)
+
+        playback.prune_playback(db, now=now)
+        db.commit()
+
+    assert not any(path.exists() for path in interrupted)
+    assert all(path.exists() for path in (
+        active, archive, frame_path, fresh, untouched_original, legacy,
+        wrong_extension, directory_candidate, symlink,
+    ))
+    assert outside.read_bytes() == b"external file"

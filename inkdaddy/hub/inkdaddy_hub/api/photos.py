@@ -4,24 +4,30 @@ from os import SEEK_END
 from typing import BinaryIO
 
 from fastapi import APIRouter, Depends, File, Form, HTTPException, Response, UploadFile
+from pydantic import BaseModel, ConfigDict, Field
 from sqlalchemy import delete, select
 from sqlalchemy.orm import Session
 from starlette.concurrency import run_in_threadpool
 
 from ..database import get_db
-from ..models import Album, AlbumItem, Photo
+from ..models import Album, AlbumItem, Photo, PhotoRevision
+from ..services.photo_framing import PHOTO_FRAMING_MODES, PhotoFraming
 from ..services.playback import MAX_RAW_FRAME_BYTES, begin_playback_write
 from ..services.photos import (
     MAX_BATCH_BYTES,
     MAX_UPLOAD_BYTES,
+    PhotoEditConflict,
     PhotoProcessingError,
     album_detail,
     album_to_dict,
     create_photo_from_bytes,
     delete_photo_record,
+    photo_framing_preview,
+    photo_revision,
     photo_to_dict,
     read_photo_asset,
     set_album_items,
+    update_photo_framing,
 )
 from .settings import photo_upload_mode
 
@@ -55,8 +61,8 @@ async def _read_image(upload: UploadFile, size: int | None = None) -> bytes:
 def _upload_mode(db: Session, mode: str | None) -> str:
     if mode is None:
         return photo_upload_mode(db)
-    if mode not in ("fit", "fill", "crop"):
-        raise HTTPException(status_code=422, detail="Select Fit, Fill, or Center crop.")
+    if mode not in (*PHOTO_FRAMING_MODES, "crop"):
+        raise HTTPException(status_code=422, detail="Select Fit, Fill, or Intelligent Crop.")
     return mode
 
 
@@ -149,6 +155,55 @@ def get_photo(photo_id: int, db: Session = Depends(get_db)) -> dict[str, object]
     return photo_to_dict(photo)
 
 
+class PhotoFramingUpdate(BaseModel):
+    model_config = ConfigDict(extra="forbid", strict=True)
+    mode: str
+    x: float | None = None
+    y: float | None = None
+    zoom: float = 1.0
+    revision: str = Field(pattern=r"^[0-9a-f]{24}$")
+
+
+@router.get("/photos/{photo_id}/framing-preview")
+def preview_photo_framing(
+    photo_id: int,
+    mode: str,
+    x: float | None = None,
+    y: float | None = None,
+    zoom: float = 1.0,
+    db: Session = Depends(get_db),
+) -> Response:
+    photo = db.get(Photo, photo_id)
+    if photo is None:
+        raise HTTPException(status_code=404, detail="Photo not found.")
+    try:
+        content, focus = photo_framing_preview(photo, PhotoFraming(mode, x, y, zoom))
+    except (ValueError, OSError) as error:
+        detail = str(error) if isinstance(error, ValueError) else "The original photo is unavailable."
+        raise HTTPException(status_code=422, detail=detail) from error
+    return Response(content=content, media_type="image/png", headers={
+        "Cache-Control": "private, no-store",
+        "X-InkDaddy-Focus-X": str(focus[0]),
+        "X-InkDaddy-Focus-Y": str(focus[1]),
+    })
+
+
+@router.put("/photos/{photo_id}/framing")
+def set_photo_framing(
+    photo_id: int, payload: PhotoFramingUpdate, db: Session = Depends(get_db)
+) -> dict[str, object]:
+    photo = db.get(Photo, photo_id)
+    if photo is None:
+        raise HTTPException(status_code=404, detail="Photo not found.")
+    try:
+        framing = PhotoFraming(payload.mode, payload.x, payload.y, payload.zoom)
+        return photo_to_dict(update_photo_framing(db, photo, framing, revision=payload.revision))
+    except PhotoEditConflict as error:
+        raise HTTPException(status_code=409, detail=str(error)) from error
+    except ValueError as error:
+        raise HTTPException(status_code=422, detail=str(error)) from error
+
+
 @router.put("/photos/{photo_id}")
 def update_photo(photo_id: int, payload: dict[str, object], db: Session = Depends(get_db)) -> dict[str, object]:
     photo = db.get(Photo, photo_id)
@@ -163,15 +218,24 @@ def update_photo(photo_id: int, payload: dict[str, object], db: Session = Depend
 
 @router.delete("/photos/{photo_id}")
 def delete_photo(photo_id: int, db: Session = Depends(get_db)) -> dict[str, object]:
+    begin_playback_write(db)
     photo = db.get(Photo, photo_id)
     if photo:
         delete_photo_record(db, photo)
     return {"deleted": True}
 
 
-@router.get("/photos/{photo_id}/preview")
-def photo_preview(photo_id: int, db: Session = Depends(get_db)) -> Response:
+def _photo_version(db: Session, photo_id: int, revision: str | None) -> Photo | PhotoRevision | None:
     photo = db.get(Photo, photo_id)
+    if photo is None or revision is None or photo_revision(photo) == revision:
+        return photo
+    archived = db.scalars(select(PhotoRevision).where(PhotoRevision.photo_id == photo_id))
+    return next((item for item in archived if photo_revision(item) == revision), None)
+
+
+@router.get("/photos/{photo_id}/preview")
+def photo_preview(photo_id: int, v: str | None = None, db: Session = Depends(get_db)) -> Response:
+    photo = _photo_version(db, photo_id, v)
     if not photo or not photo.preview_path:
         raise HTTPException(status_code=404, detail="Photo preview not found.")
     content = read_photo_asset(photo.preview_path, "previews")
@@ -181,8 +245,8 @@ def photo_preview(photo_id: int, db: Session = Depends(get_db)) -> Response:
 
 
 @router.get("/photos/{photo_id}/frame")
-def photo_frame(photo_id: int, db: Session = Depends(get_db)) -> Response:
-    photo = db.get(Photo, photo_id)
+def photo_frame(photo_id: int, v: str | None = None, db: Session = Depends(get_db)) -> Response:
+    photo = _photo_version(db, photo_id, v)
     if not photo or not photo.frame_path:
         raise HTTPException(status_code=404, detail="Photo frame not found.")
     content = read_photo_asset(photo.frame_path, "frames", limit=MAX_RAW_FRAME_BYTES)

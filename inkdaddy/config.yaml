@@ -1,6 +1,6 @@
 name: inkDaddy
 description: Manage and schedule photos and dashboards for inkDaddy ePaper displays
-version: "0.2.0-dev.19"
+version: "0.2.0-dev.20"
 slug: inkdaddy
 arch:
   - aarch64
@@ -16,3 +16,7 @@ homeassistant_api: true
 host_network: true
 startup: application
 boot: auto
+options: {}
+schema:
+  integration_relay_url: "str?"
+  integration_relay_token: "password?"

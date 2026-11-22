@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useState } from "react";
 import { apiJson } from "../lib/api";
 
-export type Framing = "fit" | "fill";
+export type Framing = "fit" | "fill" | "intelligent";
 type Settings = {
   mode: "supervisor" | "standalone";
   version: string;
@@ -11,7 +11,11 @@ type Settings = {
 };
 
 export function FramingOptions() {
-  return <><option value="fit">Fit whole photo</option><option value="fill">Fill display with a center crop</option></>;
+  return <>
+    <option value="fit">Fit whole photo</option>
+    <option value="fill">Fill display with a center crop</option>
+    <option value="intelligent">Intelligent Crop</option>
+  </>;
 }
 
 export function SimplePage({ route }: { route: "settings" | "diagnostics" | "updates" }) {
@@ -69,8 +73,9 @@ function SettingsPage() {
         </div>
         <dl className="update-list">
           <div><dt>Display size</dt><dd>{settings.target.width} × {settings.target.height}</dd></div>
-          <div><dt>Scheduled interval</dt><dd>{settings.scheduled_refresh_minutes} minutes</dd></div>
+          <div><dt>Default refresh interval</dt><dd>{settings.scheduled_refresh_minutes} minutes</dd></div>
         </dl>
+        <p>Set each frame’s refresh interval in Devices.</p>
       </> : !busy && <div className="button-row"><button className="secondary-button" onClick={() => void load()}>Retry</button></div>}
       <p role="status">{feedback || (busy ? "Working…" : "")}</p>
     </section>

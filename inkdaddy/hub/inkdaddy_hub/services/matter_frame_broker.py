@@ -22,9 +22,11 @@ from .palette import WAVESHARE_7COLOR_6
 from .playback import (
     SUCCESS_RESULTS,
     begin_playback_write,
+    epoch_minute,
     read_frame_bytes,
     refresh_playback_slots,
     repair_playback_frame,
+    scheduled_time,
 )
 
 FRAME_WIDTH = 800
@@ -91,13 +93,13 @@ def prepare_matter_frame(
         active is None
         or previous is None
         or previous.id != latest
-        or previous.hour != slot.hour
+        or previous.scheduled_minute != slot.scheduled_minute
         or previous.frame_id != slot.frame_id
         or active.render_key != slot.render_key
     ):
         previous = PlaybackOffer(
             device_id=device.id,
-            hour=slot.hour,
+            scheduled_minute=slot.scheduled_minute,
             source_type=slot.source_type,
             source_id=slot.source_id,
             title=slot.title,
@@ -130,14 +132,14 @@ def prepare_matter_frame(
         acknowledged=active.acknowledged_at is not None,
         source_type=slot.source_type,
         source_id=slot.source_id,
-        scheduled_at=datetime.fromtimestamp(slot.hour * 3600, timezone.utc),
+        scheduled_at=scheduled_time(slot.scheduled_minute),
     )
 
 
 def load_matter_frame_payload(db: Session, device: Device, offer: MatterFrameOffer) -> bytes:
     """Read the exact offered asset in the same write transaction that prepared it."""
-    hour = int(offer.scheduled_at.timestamp()) // 3600
-    slot = db.get(PlaybackSlot, (device.id, hour))
+    scheduled_minute = epoch_minute(offer.scheduled_at)
+    slot = db.get(PlaybackSlot, (device.id, scheduled_minute))
     frame = db.scalar(select(Frame).where(Frame.frame_id == offer.frame_id))
     if slot is None or slot.frame_id != offer.frame_id or frame is None or frame.sha256 != offer.sha256:
         raise MatterFrameError("The prepared frame changed before delivery.")

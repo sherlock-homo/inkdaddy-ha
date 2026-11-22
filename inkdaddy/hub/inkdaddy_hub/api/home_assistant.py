@@ -12,6 +12,7 @@ from sqlalchemy.orm import Session
 
 from ..database import get_db
 from ..models import HAEntityCache, HomeAssistantConfig
+from ..services.dashboard_calendar import fetch_calendar_choices
 from ..services.dashboard_sensors import DASHBOARD_DOMAINS, dashboard_eligible, entity_attributes
 from ..services.home_assistant import (
     HA_CONFIG_ID,
@@ -271,6 +272,18 @@ def ha_devices(db: Session = Depends(get_db)) -> dict[str, object]:
         "domains": [{"domain": domain, "entity_count": count} for domain, count in rows],
         "detail": "Home Assistant device-registry import is reserved; entity metadata is cached now.",
     }
+
+
+@router.get("/calendars")
+def list_calendars(db: Session = Depends(get_db)) -> dict[str, object]:
+    connection = get_connection(db)
+    if connection is None:
+        return {"calendars": [], "error": "Connect Home Assistant to choose a calendar."}
+    try:
+        choices = fetch_calendar_choices(connection)
+    except (OSError, ValueError):
+        return {"calendars": [], "error": "Home Assistant calendars are unavailable."}
+    return {"calendars": choices, "error": None}
 
 
 @router.post("/mock/entities")

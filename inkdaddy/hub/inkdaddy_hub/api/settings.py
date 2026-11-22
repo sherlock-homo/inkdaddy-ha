@@ -15,7 +15,7 @@ from ..services.playback import begin_playback_write
 
 router = APIRouter(prefix="/api/settings", tags=["settings"])
 
-PhotoFraming = Literal["fit", "fill"]
+PhotoFraming = Literal["fit", "fill", "intelligent"]
 PHOTO_FRAMING_KEY = "photo_upload_mode"
 
 
@@ -33,6 +33,8 @@ def photo_upload_mode(db: Session) -> PhotoFraming:
             value = None
         if value in ("fill", "crop"):
             return "fill"
+        if value == "intelligent":
+            return "intelligent"
     return "fit"
 
 

@@ -1,14 +1,15 @@
 import { useEffect, useRef, useState } from "react";
 import { EpaperPreview } from "../components/EpaperPreview";
 import { apiFetch, apiJson, apiPath } from "../lib/api";
-import type { DashboardConfig, DashboardRecord, DashboardWidget, DeviceRecord } from "../lib/types";
+import type { DashboardConfig, DashboardRecord, DashboardWidget, DeviceRecord, PhotoRecord } from "../lib/types";
 import {
-  createWidget, dashboardPresets, displayText, presetWidgets, tiles, WidgetGallery, WidgetSettings, WidgetSymbol, widgetAt, widgetKind,
+  createWidget, dashboardPresets, displayText, fits, presetWidgets, tiles, WidgetGallery, WidgetSettings, WidgetSymbol, widgetAt, widgetKind,
   widgetKinds, widgetTitle, type Tile, type WidgetKind
 } from "./DashboardWidgets";
 import "./dashboards.css";
 
 const emptyConfig: DashboardConfig = { name: "", grid: { cols: 4, rows: 2 }, widgets: [] };
+type PhotoOverlay = { device_uid: string; dashboard_id: string | null };
 
 function dashboardError(reason: unknown, fallback: string) {
   if (!(reason instanceof Error)) return fallback;
@@ -116,6 +117,7 @@ export function DashboardsPage() {
     </header>
     {error && <p className="warning-text" role="alert">{error}</p>}
     {message && <p className="preview-message" role="status">{message}</p>}
+    {devices.length > 0 && <PhotoOverlaySettings devices={devices} dashboards={items} />}
     <div className="dd-workspace" data-editing={editing}>
       <section className="dd-library workflow-panel" aria-label="Saved dashboards">
         <h2>Saved dashboards</h2>
@@ -136,6 +138,74 @@ export function DashboardsPage() {
   </div>;
 }
 
+function PhotoOverlaySettings({ devices, dashboards }: { devices: DeviceRecord[]; dashboards: DashboardRecord[] }) {
+  const [assignments, setAssignments] = useState<PhotoOverlay[]>();
+  const [selectedDevice, setSelectedDevice] = useState<string>();
+  const [draft, setDraft] = useState<string>();
+  const [saving, setSaving] = useState(false);
+  const [error, setError] = useState("");
+  const [status, setStatus] = useState("");
+  const deviceUid = selectedDevice ?? devices[0].device_uid;
+  const saved = assignments?.find((item) => item.device_uid === deviceUid)?.dashboard_id ?? "";
+  const layout = draft ?? saved;
+
+  useEffect(() => {
+    const controller = new AbortController();
+    apiJson<{ overlays: PhotoOverlay[] }>("/api/dashboards/photo-overlays", { signal: controller.signal })
+      .then(({ overlays }) => { if (!controller.signal.aborted) setAssignments(overlays); })
+      .catch(() => { if (!controller.signal.aborted) setError("Unable to load photo overlays."); });
+    return () => controller.abort();
+  }, []);
+
+  async function save(event: React.FormEvent) {
+    event.preventDefault();
+    if (!assignments || saving || saved === layout) return;
+    setSaving(true);
+    setError("");
+    setStatus("");
+    try {
+      const assignment = await apiJson<PhotoOverlay>(`/api/dashboards/photo-overlays/${encodeURIComponent(deviceUid)}`, {
+        method: "PUT",
+        body: JSON.stringify({ dashboard_id: layout || null })
+      });
+      setAssignments((previous) => [...(previous ?? []).filter((row) => row.device_uid !== deviceUid), assignment]);
+      setDraft(undefined);
+      setStatus(layout ? "Overlay saved for future photo refreshes." : "Future photos will show without an overlay.");
+    } catch (reason) {
+      setError(dashboardError(reason, "Unable to change the photo overlay."));
+    } finally {
+      setSaving(false);
+    }
+  }
+
+  return <section className="workflow-panel dd-overlay-settings" aria-labelledby="dd-photo-overlay-heading">
+    <div>
+      <h2 id="dd-photo-overlay-heading">Photo overlays</h2>
+      <p>Show a saved layout over photos on a display. Use the editor to preview it on a photo.</p>
+    </div>
+    <form className="form-row" onSubmit={(event) => void save(event)}>
+      <label>Display<select aria-label="Display" value={deviceUid} disabled={saving} onChange={(event) => {
+        setSelectedDevice(event.target.value); setDraft(undefined); setError(""); setStatus("");
+      }}>
+        {devices.map((device) => <option key={device.device_uid} value={device.device_uid}>{device.name}</option>)}
+      </select></label>
+      <label>Overlay layout<select aria-label="Overlay layout" value={layout} disabled={!assignments || saving}
+        onChange={(event) => { setDraft(event.target.value); setStatus(""); }}>
+        <option value="">No overlay</option>
+        {saved && !dashboards.some((record) => record.id === saved && record.config.widgets.length > 0) &&
+          <option value={saved}>{dashboards.find((record) => record.id === saved)?.name || saved}</option>}
+        {dashboards.filter((record) => record.config.widgets.length > 0).map((record) =>
+          <option key={record.id} value={record.id}>{record.name}</option>)}
+      </select></label>
+      <button type="submit" className="secondary-button" disabled={saving || !assignments || saved === layout}>
+        {saving ? "Applying…" : "Apply overlay"}
+      </button>
+    </form>
+    {error && <p className="warning-text" role="alert">{error}</p>}
+    {status && <p className="preview-message" role="status">{status}</p>}
+  </section>;
+}
+
 function DashboardEditor({ dashboard, devices, heading, onSave, onDelete, onDirty, onClose }: {
   dashboard: DashboardRecord | null;
   devices: DeviceRecord[];
@@ -150,6 +220,10 @@ function DashboardEditor({ dashboard, devices, heading, onSave, onDelete, onDirt
   const [tile, setTile] = useState<Tile>(tiles[0]);
   const [previewUrl, setPreviewUrl] = useState<string | null>(null);
   const [chosenDevice, setChosenDevice] = useState<string>();
+  const [previewMode, setPreviewMode] = useState<"dashboard" | "photo">("dashboard");
+  const [photos, setPhotos] = useState<PhotoRecord[]>([]);
+  const [chosenPhoto, setChosenPhoto] = useState<string>();
+  const [photoMessage, setPhotoMessage] = useState("");
   const [busy, setBusy] = useState<"save" | "preview" | "delete" | null>(null);
   const [error, setError] = useState("");
   const previewPanel = useRef<HTMLDivElement>(null);
@@ -161,6 +235,8 @@ function DashboardEditor({ dashboard, devices, heading, onSave, onDelete, onDirt
   const occupied = draft.widgets.reduce((sum, item) => sum + item.w * item.h, 0);
   const dirty = JSON.stringify(draft) !== JSON.stringify(savedConfig);
   const deviceUid = chosenDevice ?? (devices.length === 1 ? devices[0].device_uid : "");
+  const photoId = chosenPhoto ?? photos[0]?.id;
+  const previewPhoto = previewMode === "photo" ? photos.find((photo) => photo.id === photoId) : undefined;
 
   useEffect(() => onDirty(dirty), [dirty, onDirty]);
   useEffect(() => {
@@ -169,6 +245,21 @@ function DashboardEditor({ dashboard, devices, heading, onSave, onDelete, onDirt
     return () => URL.revokeObjectURL(previewUrl);
   }, [previewUrl]);
   useEffect(() => () => previewRequest.current?.abort(), []);
+  useEffect(() => {
+    if (previewMode !== "photo") return;
+    const controller = new AbortController();
+    setPhotoMessage("Loading photos…");
+    apiJson<{ photos: PhotoRecord[] }>("/api/photos", { signal: controller.signal })
+      .then(({ photos: library }) => {
+        if (controller.signal.aborted) return;
+        const ready = library.filter((photo) => photo.processed_status === "ready");
+        setPhotos(ready);
+        setChosenPhoto((previous) => ready.some((photo) => photo.id === previous) ? previous : undefined);
+        setPhotoMessage(ready.length ? "" : "Add a photo in Photos to preview this overlay.");
+      })
+      .catch(() => { if (!controller.signal.aborted) setPhotoMessage("Unable to load photos."); });
+    return () => controller.abort();
+  }, [previewMode]);
 
   const change = (config: DashboardConfig) => {
     setDraft(config);
@@ -199,7 +290,11 @@ function DashboardEditor({ dashboard, devices, heading, onSave, onDelete, onDirt
     focusInspector();
   };
 
-  const configPayload = () => JSON.stringify({ yaml: JSON.stringify({ ...draft, name: draft.name.trim() }), device_uid: deviceUid || undefined });
+  const configPayload = (preview = false) => JSON.stringify({
+    yaml: JSON.stringify({ ...draft, name: draft.name.trim() }),
+    device_uid: deviceUid || undefined,
+    photo_id: preview ? previewPhoto?.id : undefined
+  });
 
   const save = async (event: React.FormEvent) => {
     event.preventDefault();
@@ -225,7 +320,7 @@ function DashboardEditor({ dashboard, devices, heading, onSave, onDelete, onDirt
     setError("");
     try {
       const response = await apiFetch("/api/dashboards/preview", {
-        method: "POST", headers: { "Content-Type": "application/json" }, body: configPayload(), signal: controller.signal
+        method: "POST", headers: { "Content-Type": "application/json" }, body: configPayload(true), signal: controller.signal
       });
       if (!response.ok) {
         const payload: { detail?: unknown } = await response.json().catch(() => ({}));
@@ -282,7 +377,8 @@ function DashboardEditor({ dashboard, devices, heading, onSave, onDelete, onDirt
               <button type="button" className="secondary-button dd-add-widget" disabled={Boolean(busy) || !vacant}
                 onClick={() => { if (vacant) selectTile(vacant); }}>Add widget</button>
             </div>
-            <div className="dd-canvas" aria-label="Dashboard tile layout">
+            <div className="dd-canvas" aria-label="Dashboard tile layout" data-photo={Boolean(previewPhoto?.preview_url)}
+              style={previewPhoto?.preview_url ? { backgroundImage: `url("${apiPath(previewPhoto.preview_url)}")` } : undefined}>
               {tiles.map((position) => {
                 const item = widgetAt(draft.widgets, position);
                 if (item && (item.x !== position.x || item.y !== position.y)) return null;
@@ -306,20 +402,30 @@ function DashboardEditor({ dashboard, devices, heading, onSave, onDelete, onDirt
                   `Row ${tile.y + 1}, column ${tile.x + 1}`}</p></div>
             </div>
             {widget ? <WidgetSettings key={widget.id} widget={widget} widgets={draft.widgets} disabled={Boolean(busy)} onChange={updateWidget}
-              onRemove={removeWidget} /> : <WidgetGallery disabled={Boolean(busy)} onAdd={addWidget} />}
+              onRemove={removeWidget} /> : <WidgetGallery disabled={Boolean(busy)} fitsAgenda={fits(draft.widgets, tile, 2, 1)} onAdd={addWidget} />}
           </section>
         </div>
         <footer className="dd-editor-footer">
           <div className="dd-preview-actions">
+            <label>Preview layout<select aria-label="Preview layout" value={previewMode} disabled={Boolean(busy)} onChange={(event) => {
+              setPreviewMode(event.target.value === "photo" ? "photo" : "dashboard"); setPreviewUrl(null);
+            }}>
+              <option value="dashboard">Dashboard</option><option value="photo">Over a photo</option>
+            </select></label>
+            {previewMode === "photo" && photos.length > 0 && <label>Photo<select aria-label="Photo" value={photoId} disabled={Boolean(busy)} onChange={(event) => {
+              setChosenPhoto(event.target.value); setPreviewUrl(null);
+            }}>{photos.map((photo) => <option key={photo.id} value={photo.id}>{photo.original_filename}</option>)}</select></label>}
             {devices.length > 0 && <label>Preview for<select value={deviceUid} disabled={Boolean(busy)} onChange={(event) => {
               setChosenDevice(event.target.value); setPreviewUrl(null);
             }}><option value="">Any display</option>
               {devices.map((device) => <option key={device.device_uid} value={device.device_uid}>{device.name}</option>)}
             </select></label>}
-            <button type="button" className="secondary-button" disabled={Boolean(busy) || !draft.widgets.length} onClick={() => void preview()}>{busy === "preview" ? "Rendering…" : "Preview"}</button>
+            <button type="button" className="secondary-button" disabled={Boolean(busy) || !draft.widgets.length || (previewMode === "photo" && !previewPhoto)}
+              onClick={() => void preview()}>{busy === "preview" ? "Rendering…" : "Preview"}</button>
           </div>
           <button type="submit" className="primary-button" disabled={Boolean(busy) || !draft.name.trim()}>{busy === "save" ? "Saving…" : "Save dashboard"}</button>
         </footer>
+        {previewMode === "photo" && photoMessage && <p className="dd-hint" role="status">{photoMessage}</p>}
         {error && <p className="warning-text" role="alert">{error}</p>}
         {dashboard && <div className="dd-secondary-actions">
           <a className="secondary-link" href={apiPath(`/api/dashboards/${encodeURIComponent(dashboard.id)}/export`)} download={`${dashboard.id}.yaml`}>Download saved YAML</a>
@@ -328,7 +434,8 @@ function DashboardEditor({ dashboard, devices, heading, onSave, onDelete, onDirt
       </div>
     </form>
     {previewUrl && <div ref={previewPanel} tabIndex={-1} className="dashboard-preview">
-      <EpaperPreview title="Dashboard preview" caption={devices.find((device) => device.device_uid === deviceUid)?.name || draft.name || "Untitled dashboard"}
+      <EpaperPreview title={previewPhoto ? "Photo overlay preview" : "Dashboard preview"}
+        caption={previewPhoto?.original_filename || devices.find((device) => device.device_uid === deviceUid)?.name || draft.name || "Untitled dashboard"}
         previewUrl={previewUrl} empty="Preview unavailable.">
         <button className="secondary-button" onClick={() => { setPreviewUrl(null); heading.current?.focus(); }}>Back to editor</button>
       </EpaperPreview>

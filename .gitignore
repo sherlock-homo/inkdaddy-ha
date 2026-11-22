@@ -25,6 +25,7 @@ frames/
 *.db-*
 *.sqlite*
 *.log
+*.token
 *.pem
 *.key
 *.crt
@@ -38,3 +39,4 @@ frames/
 *.tar.gz
 *.zip
 secrets.json
+integration-request.json

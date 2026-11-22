@@ -23,6 +23,7 @@ from inkdaddy_hub.models import (
     Frame,
     HAEntityCache,
     Photo,
+    PhotoRevision,
     Playback,
     PlaybackSlot,
 )
@@ -44,6 +45,7 @@ from inkdaddy_hub.services.playback import (
     prune_playback,
     refresh_playback_slots,
     update_playlist,
+    update_refresh_interval,
 )
 from inkdaddy_hub.services.udp_frame_transfer import (
     FrameTransferRequest,
@@ -108,6 +110,104 @@ def test_frame_http_and_matter_reject_unmanaged_or_oversized_payloads(catalog, t
     assert preview_error.value.status_code == 404
     with pytest.raises(MatterFrameError):
         prepare_matter_frame(db, device.device_uid, now=NOW)
+
+
+def test_change_refresh_interval_preserves_current_offer_and_round_trips_matter(catalog):
+    from inkdaddy_hub.services.matter_frame_broker import load_matter_frame_payload
+
+    db, device, photo = catalog
+    update_playlist(db, device, [{"type": "dashboard", "id": "sample"},
+                                 {"type": "photo", "id": str(photo.id)}], NOW)
+    initial = prepare_matter_frame(db, device.device_uid, now=NOW)
+    assert record_matter_frame_receipt(
+        db, device.device_uid, transfer_id=initial.transfer_id, frame_id=initial.frame_id, result="ok", now=NOW,
+    )
+    refresh_playback_slots(db, device, now=NOW)
+    update_refresh_interval(db, device, 90, NOW)
+    refresh_playback_slots(db, device, now=NOW)
+    assert prepare_matter_frame(db, device.device_uid, now=NOW).transfer_id == initial.transfer_id
+    status = playback_status(db, device, NOW)
+    assert status["current"]["frame_id"] == initial.frame_id
+    assert [item["scheduled_at"][11:16] for item in status["upcoming"]] == [
+        "17:30", "19:00", "20:30", "22:00", "23:30",
+    ]
+
+    next_tick = NOW.replace(hour=17, minute=30)
+    next_frame = prepare_matter_frame(db, device.device_uid, now=next_tick, include_payload=False)
+    assert next_frame.scheduled_at == next_tick
+    assert next_frame.source_id == str(photo.id)
+    assert load_matter_frame_payload(db, device, next_frame)
+
+    apply_playback_action(db, device, "pause", next_tick)
+    update_refresh_interval(db, device, 20, next_tick)
+    later = next_tick + timedelta(minutes=60)
+    paused = prepare_matter_frame(db, device.device_uid, now=later)
+    assert (paused.source_id, paused.transfer_id, paused.scheduled_at) == (
+        next_frame.source_id, next_frame.transfer_id, next_tick,
+    )
+    apply_playback_action(db, device, "play", later)
+    following = prepare_matter_frame(db, device.device_uid, now=later + timedelta(minutes=20))
+    assert following.source_type == "dashboard"
+
+
+@pytest.mark.parametrize("overlay_id", ["sample", "agenda"])
+def test_photo_overlay_repairs_exact_offered_bytes_after_photo_and_layout_edits(
+    catalog, tmp_path, monkeypatch, overlay_id,
+):
+    from inkdaddy_hub.services import dashboard_content
+
+    db, device, photo = catalog
+    db.add(Dashboard(slug="agenda", name="Calendar", current_yaml=json.dumps({
+        "name": "Calendar",
+        "widgets": [{
+            "id": "event_list", "type": "agenda", "x": 0, "y": 1, "w": 2, "h": 1,
+            "source": {"type": "calendar", "entity_id": "calendar.fixture"},
+            "options": {"show_event_titles": True},
+        }],
+    })))
+    db.flush()
+    monkeypatch.setattr(dashboard_content, "upcoming_agenda", lambda *args, **kwargs: ("17:15 · Fixture",))
+    device.selected_source_type = "photo"
+    plain = refresh_playback_slots(db, device, now=NOW)
+    plain_id = plain.frame_id
+    device.overlay_dashboard_id = overlay_id
+    original_offer = prepare_matter_frame(db, device.device_uid, now=NOW)
+    assert original_offer.frame_id != plain_id
+    due = db.get(PlaybackSlot, (device.id, playback.epoch_minute(NOW.replace(minute=0))))
+    if overlay_id == "agenda":
+        assert '"agenda": true' in due.photo_render_json
+        assert "calendar.fixture" not in due.photo_render_json
+    original_frame = db.scalar(select(Frame).where(Frame.frame_id == original_offer.frame_id))
+    frame_path = Path(original_frame.path)
+    db.add(PhotoRevision(photo_id=photo.id, processed_path=photo.processed_path))
+    reframed = tmp_path / "processed" / "new-framing.png"
+    Image.new("RGB", (800, 480), "red").save(reframed)
+    photo.processed_path = str(reframed)
+    device.overlay_dashboard_id = None
+    db.commit()
+    frame_path.unlink()
+
+    restored = prepare_matter_frame(db, device.device_uid, now=NOW, repair_cache=True)
+    assert restored == original_offer
+    assert frame_path.read_bytes() == original_offer.payload
+    next_frame = prepare_matter_frame(db, device.device_uid, now=NOW + timedelta(hours=1))
+    assert next_frame.frame_id not in {plain_id, original_offer.frame_id}
+
+
+def test_shorter_interval_keeps_in_flight_offer_and_advances_once_at_next_tick(catalog):
+    db, device, photo = catalog
+    update_playlist(db, device, [{"type": "dashboard", "id": "sample"},
+                                 {"type": "photo", "id": str(photo.id)}], NOW)
+    pending = prepare_matter_frame(db, device.device_uid, now=NOW)
+    update_refresh_interval(db, device, 25, NOW)
+    refresh_playback_slots(db, device, now=NOW)
+    assert prepare_matter_frame(db, device.device_uid, now=NOW + timedelta(minutes=1)) == pending
+    assert record_matter_frame_receipt(
+        db, device.device_uid, transfer_id=pending.transfer_id, frame_id=pending.frame_id, result="ok", now=NOW,
+    )
+    assert playback_status(db, device, NOW)["upcoming"][0]["scheduled_at"][11:16] == "16:50"
+    due = prepare_matter_frame(db, device.device_uid, now=NOW + timedelta(minutes=5))
+    assert (due.scheduled_at.minute, due.source_type) == (50, "photo")
 
 
 def test_regeneration_does_not_write_to_a_foreign_persisted_path(catalog, tmp_path):
@@ -263,7 +363,7 @@ def test_manual_dashboard_time_survives_worker_delay_without_shifting_slots(cata
     with Session(db.bind, autoflush=False) as worker:
         slot = refresh_playback_slots(worker, worker.get(Device, device_id), now=later)
         status = playback_status(worker, worker.get(Device, device_id), later)
-        assert slot.hour == int(NOW.timestamp()) // 3600
+        assert slot.scheduled_minute == playback.epoch_minute(NOW.replace(minute=0))
         assert status["pending"]["scheduled_at"] == "2026-11-18T16:00:00+00:00"
         assert [item["scheduled_at"][11:16] for item in status["upcoming"]] == [
             "17:00", "18:00", "19:00", "20:00", "21:00",
@@ -276,7 +376,7 @@ def test_manual_dashboard_time_survives_worker_delay_without_shifting_slots(cata
 def test_paused_manual_dashboard_refresh_uses_new_date_and_repairs_exact_bitmap(catalog):
     db, device, _photo = catalog
     apply_playback_action(db, device, "pause", NOW)
-    anchor = db.get(Playback, device.id).anchor_hour
+    anchor = db.get(Playback, device.id).anchor_minute
     requested = NOW + timedelta(days=1, hours=2, minutes=3)
     db.add(HAEntityCache(
         entity_id="weather.home", domain="weather", state="sunny",
@@ -289,7 +389,7 @@ def test_paused_manual_dashboard_refresh_uses_new_date_and_repairs_exact_bitmap(
     rendered_at = requested + timedelta(minutes=2)
     offer = prepare_matter_frame(db, uid, now=rendered_at)
     assert offer.scheduled_at.isoformat() == "2026-11-18T16:00:00+00:00"
-    assert db.get(Playback, device.id).anchor_hour == anchor
+    assert db.get(Playback, device.id).anchor_minute == anchor
     config = dashboard_config(None)
     widgets = resolve_widget_text(db, config, requested, device, observed_at=rendered_at, time_kind="manual")
     assert (widgets[0].value, widgets[0].detail) == ("18:48", "Requested Thu, Nov 19")
@@ -310,7 +410,7 @@ def test_paused_manual_dashboard_refresh_uses_new_date_and_repairs_exact_bitmap(
 def test_existing_dashboard_offer_keeps_its_original_bitmap_after_clock_update(catalog, render_version):
     db, device, _photo = catalog
     device.battery_percent = 84
-    hour = int(NOW.timestamp()) // 3600
+    hour = playback.epoch_minute(NOW.replace(minute=0))
     timestamp = NOW.replace(minute=0)
     config = dashboard_config(None)
     widgets = resolve_widget_text(db, config, timestamp, device, render_version=render_version)
@@ -318,7 +418,7 @@ def test_existing_dashboard_offer_keeps_its_original_bitmap_after_clock_update(c
     exact, sha = raw_frame_from_image(image, dither=True)
     frame = playback._store_frame(db, exact, image, playback.Source("dashboard", "sample"))
     slot = PlaybackSlot(
-        device_id=device.id, hour=hour, source_type="dashboard", source_id="sample",
+        device_id=device.id, scheduled_minute=hour, source_type="dashboard", source_id="sample",
         title=config["name"], frame_id=frame.frame_id,
         render_key=playback._render_key(("dashboard", "sample", config["name"], config, [asdict(widget) for widget in widgets])),
     )
@@ -578,11 +678,11 @@ def test_preupgrade_photo_offer_repairs_and_only_unoffered_slots_get_new_dither(
     legacy_key = hashlib.sha256(
         json.dumps(legacy_version, sort_keys=True, default=str).encode()
     ).hexdigest()
-    hour = int(NOW.timestamp()) // 3600
-    for scheduled_hour in (hour, hour + 1):
+    hour = playback.epoch_minute(NOW.replace(minute=0))
+    for scheduled_hour in (hour, hour + 60):
         db.add(PlaybackSlot(
             device_id=device.id,
-            hour=scheduled_hour,
+            scheduled_minute=scheduled_hour,
             source_type=source.type,
             source_id=source.id,
             title=photo.original_filename,
@@ -609,7 +709,7 @@ def test_preupgrade_photo_offer_repairs_and_only_unoffered_slots_get_new_dither(
     recovered = prepare_matter_frame(db, device.device_uid, now=NOW, repair_cache=True)
     assert recovered == initial
     assert path.read_bytes() == old_raw
-    upcoming = db.get(PlaybackSlot, (device.id, hour + 1))
+    upcoming = db.get(PlaybackSlot, (device.id, hour + 60))
     assert upcoming.render_key != legacy_key
     assert upcoming.frame_id == new_digest[:24]
     upgraded_frame = db.scalar(select(Frame).where(Frame.frame_id == upcoming.frame_id))

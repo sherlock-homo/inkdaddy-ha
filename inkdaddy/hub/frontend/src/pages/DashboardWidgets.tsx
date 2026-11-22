@@ -4,6 +4,8 @@ import type { DashboardWidget, HAEntity } from "../lib/types";
 
 export const widgetKinds = {
   clock: { name: "Clock", subtitle: "Local time of a scheduled or requested refresh", symbol: "◷" },
+  date: { name: "Date", subtitle: "Day and date of the frame", symbol: "▦" },
+  calendar: { name: "Upcoming events", subtitle: "The next 24 hours on a Home Assistant calendar", symbol: "▤" },
   location: { name: "Location", subtitle: "Name and time zone of your home", symbol: "⌖" },
   weather: { name: "Weather", subtitle: "Current conditions from Home Assistant", symbol: "☁" },
   device_battery: { name: "Display battery", subtitle: "Last battery level reported by this display", symbol: "▰" },
@@ -21,7 +23,7 @@ const noteSpans: Span[] = [[1, 1], [2, 1], [4, 1], [2, 2], [4, 2]];
 const spans: Record<string, Span[]> = {
   entity_state: basicSpans, big_number: basicSpans, on_off_state: [[1, 1]], status_pill: [[1, 1]],
   weather_summary: wideSpans, line_chart: wideSpans, bar_chart: wideSpans, donut_chart: [[1, 1], [2, 2]],
-  agenda: [[2, 2], [4, 1], [4, 2]], text_note: noteSpans, photo_tile: noteSpans,
+  agenda: wideSpans, text_note: noteSpans, photo_tile: noteSpans,
   vertical_status_stack: [[1, 2]], full_dashboard: [[4, 2]]
 };
 
@@ -60,7 +62,8 @@ export function createWidget(kind: WidgetKind, tile: Tile, widgets: DashboardWid
   const ids = new Set(widgets.map((item) => item.id));
   let id = base;
   for (let suffix = 2; ids.has(id); suffix++) id = `${base}-${suffix}`;
-  const type = kind === "text" ? "text_note" : kind === "weather" && fits(widgets, tile, 2, 1) ? "weather_summary" : "entity_state";
+  const type = kind === "calendar" ? "agenda" : kind === "text" ? "text_note" :
+    kind === "weather" && fits(widgets, tile, 2, 1) ? "weather_summary" : "entity_state";
   const [w, h] = spans[type][0];
   const options = kind === "home_assistant" ? {} : { label: widgetKinds[kind].name };
   return { ...tile, id, type, w, h, options,
@@ -73,6 +76,9 @@ export const dashboardPresets: Record<string, { name: string; detail: string; wi
   ] },
   glance: { name: "At a glance", detail: "Clock and display battery", widgets: [
     ["clock", { x: 0, y: 0 }, 2], ["device_battery", { x: 2, y: 0 }]
+  ] },
+  photo: { name: "Photo corner cards", detail: "Date and weather leave the photo in view", widgets: [
+    ["date", { x: 0, y: 1 }], ["weather", { x: 2, y: 1 }]
   ] }
 };
 
@@ -90,9 +96,12 @@ export function WidgetSymbol({ kind }: { kind?: WidgetKind }) {
   return <span className="dd-widget-symbol" data-kind={kind} aria-hidden="true">{kind ? widgetKinds[kind].symbol : "▪"}</span>;
 }
 
-export function WidgetGallery({ disabled, onAdd }: { disabled: boolean; onAdd: (kind: WidgetKind) => void }) {
+export function WidgetGallery({ disabled, fitsAgenda, onAdd }: {
+  disabled: boolean; fitsAgenda: boolean; onAdd: (kind: WidgetKind) => void;
+}) {
   return <div className="dd-widget-gallery" aria-label="Available widgets">
-    {(Object.keys(widgetKinds) as WidgetKind[]).map((kind) => <button key={kind} type="button" disabled={disabled} onClick={() => onAdd(kind)}>
+    {(Object.keys(widgetKinds) as WidgetKind[]).map((kind) => <button key={kind} type="button"
+      disabled={disabled || (kind === "calendar" && !fitsAgenda)} onClick={() => onAdd(kind)}>
       <WidgetSymbol kind={kind} /><span><strong>{widgetKinds[kind].name}</strong><small>{widgetKinds[kind].subtitle}</small></span><span aria-hidden="true" className="dd-add-symbol">+</span>
     </button>)}
   </div>;
@@ -188,6 +197,36 @@ function EntityPicker({ weather, selected, disabled, onChange }: {
   </div>;
 }
 
+type CalendarChoice = { entity_id: string; name: string };
+
+function CalendarPicker({ selected, disabled, onChange }: {
+  selected: string; disabled: boolean; onChange: (entityId: string) => void;
+}) {
+  const [choices, setChoices] = useState<CalendarChoice[]>([]);
+  const [message, setMessage] = useState("Loading calendars…");
+
+  useEffect(() => {
+    const controller = new AbortController();
+    apiJson<{ calendars: CalendarChoice[]; error: string | null }>("/api/home-assistant/calendars", { signal: controller.signal })
+      .then((response) => {
+        if (controller.signal.aborted) return;
+        setChoices(response.calendars);
+        setMessage(response.error || (response.calendars.length ? "" : "No calendars are available."));
+      })
+      .catch(() => { if (!controller.signal.aborted) setMessage("Unable to load calendars."); });
+    return () => controller.abort();
+  }, []);
+
+  return <>
+    <label>Calendar<select aria-label="Calendar" value={selected} disabled={disabled} onChange={(event) => onChange(event.target.value)}>
+      <option value="">No calendar selected</option>
+      {selected && !choices.some((choice) => choice.entity_id === selected) && <option value={selected}>{selected}</option>}
+      {choices.map((choice) => <option key={choice.entity_id} value={choice.entity_id}>{choice.name}</option>)}
+    </select></label>
+    {message && <p className="dd-hint" role="status">{message}</p>}
+  </>;
+}
+
 export function WidgetSettings({ widget, widgets, disabled, onChange, onRemove }: {
   widget: DashboardWidget; widgets: DashboardWidget[]; disabled: boolean;
   onChange: (widget: DashboardWidget) => void; onRemove: () => void;
@@ -200,6 +239,17 @@ export function WidgetSettings({ widget, widgets, disabled, onChange, onRemove }
     {(kind === "home_assistant" || kind === "weather") && <EntityPicker weather={kind === "weather"}
       selected={displayText(widget.source?.entity_id)} disabled={disabled}
       onChange={(entityId) => onChange({ ...widget, source: { ...widget.source, entity_id: entityId || undefined } })} />}
+    {kind === "calendar" && <>
+      <CalendarPicker selected={displayText(widget.source?.entity_id)} disabled={disabled}
+        onChange={(entityId) => onChange({ ...widget, source: { ...widget.source, entity_id: entityId || undefined },
+          options: { ...widget.options, show_event_titles: false } })} />
+      <label className="dd-calendar-titles"><input type="checkbox" disabled={disabled || !widget.source?.entity_id}
+        checked={widget.options?.show_event_titles === true}
+        onChange={(event) => onChange({ ...widget, options: { ...widget.options, show_event_titles: event.target.checked } })} />
+        Show event titles on the display
+      </label>
+      <p className="dd-hint">Events appear as Busy unless you share their titles.</p>
+    </>}
     <label>Label<input value={displayText(widget.options?.label)} maxLength={80} disabled={disabled}
       onChange={(event) => onChange({ ...widget, options: { ...widget.options, label: event.target.value } })} /></label>
     {kind === "text" && <label>Text<textarea value={displayText(widget.options?.text)} maxLength={120} rows={2} disabled={disabled}

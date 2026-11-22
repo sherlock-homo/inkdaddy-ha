@@ -1,9 +1,12 @@
 from __future__ import annotations
 
+import hashlib
+import json
 import logging
 import re
 import uuid
-from dataclasses import dataclass
+from dataclasses import asdict, dataclass
+from datetime import datetime, timedelta
 from functools import lru_cache
 from io import BytesIO
 from os import fstat
@@ -12,14 +15,15 @@ from struct import iter_unpack
 from typing import BinaryIO
 
 from PIL import Image, ImageCms, ImageOps, PngImagePlugin
-from sqlalchemy import delete, func, select
+from sqlalchemy import delete, func, select, union_all
 from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.orm import Session
 
 from ..config import HubSettings, get_settings
-from ..models import Album, AlbumItem, Photo
-from .asset_storage import open_asset, read_asset, remove_asset
+from ..models import Album, AlbumItem, Frame, Photo, PhotoRevision
+from .asset_storage import asset_names, open_asset, read_asset, remove_asset, write_asset
 from .palette import WAVESHARE_7COLOR_6, raw_photo_frame
+from .photo_framing import PhotoFraming, frame_photo
 
 LOGGER = logging.getLogger(__name__)
 ALLOWED_EXTENSIONS = {".jpg", ".jpeg", ".png", ".webp", ".bmp"}
@@ -31,9 +35,15 @@ MAX_IMAGE_PIXELS = 50_000_000
 MAX_ICC_PROFILE_BYTES = 1024 * 1024
 _RGB_PHOTO_MODES = {"RGB", "RGBA", "RGBX", "P", "PA"}
 _RGB_ICC_CLASSES = {b"scnr", b"mntr", b"prtr", b"spac"}
+_PHOTO_DERIVATIVE_STEM = re.compile(r"photo-[0-9a-f]{12}4[0-9a-f]{3}[89ab][0-9a-f]{15}")
+_ORPHAN_DERIVATIVE_AGE = timedelta(days=1)
 
 
 class PhotoProcessingError(ValueError):
+    pass
+
+
+class PhotoEditConflict(PhotoProcessingError):
     pass
 
 
@@ -58,6 +68,8 @@ def sanitize_filename(filename: str) -> str:
 
 
 def photo_to_dict(photo: Photo) -> dict[str, object]:
+    revision = photo_revision(photo)
+    framing = json.loads(photo.framing_json) if photo.framing_json else None
     return {
         "id": str(photo.id),
         "original_filename": photo.original_filename,
@@ -67,11 +79,18 @@ def photo_to_dict(photo: Photo) -> dict[str, object]:
         "height": photo.height,
         "palette": photo.palette,
         "checksum": photo.checksum,
-        "preview_url": f"/api/photos/{photo.id}/preview" if photo.preview_path else None,
-        "frame_url": f"/api/photos/{photo.id}/frame" if photo.frame_path else None,
+        "preview_url": f"/api/photos/{photo.id}/preview?v={revision}" if photo.preview_path else None,
+        "frame_url": f"/api/photos/{photo.id}/frame?v={revision}" if photo.frame_path else None,
+        "framing": framing,
+        "revision": revision,
+        "can_edit_framing": bool(revision and photo.original_path and photo.processed_status == "ready"),
         "uploaded_at": photo.created_at.isoformat() if photo.created_at else None,
         "updated_at": photo.updated_at.isoformat() if photo.updated_at else None,
     }
+
+
+def photo_revision(photo: Photo | PhotoRevision) -> str | None:
+    return hashlib.sha256(photo.processed_path.encode()).hexdigest()[:24] if photo.processed_path else None
 
 
 def album_to_dict(db: Session, album: Album) -> dict[str, object]:
@@ -107,7 +126,8 @@ def create_photo_from_bytes(
     try:
         original_path.parent.mkdir(parents=True, exist_ok=True)
         original_path.write_bytes(content)
-        processed = process_photo_file(stem, original_path, mode=mode, settings=settings)
+        framing = PhotoFraming("fill" if mode == "crop" else mode)
+        processed = process_photo_file(stem, original_path, framing=framing, settings=settings)
         photo = Photo(
             original_filename=safe_name,
             stored_filename=original_path.name,
@@ -120,6 +140,7 @@ def create_photo_from_bytes(
             palette=processed.palette,
             checksum=processed.checksum,
             processed_status="ready",
+            framing_json=json.dumps(asdict(framing)),
         )
         db.add(photo)
         db.commit()
@@ -148,26 +169,42 @@ def _processed_paths(settings: HubSettings, photo_id: int | str) -> tuple[Path, 
 
 def process_photo_file(
     photo_id: int | str,
-    original_path: Path,
+    source: Path | BinaryIO,
     *,
     mode: str = "fit",
+    framing: PhotoFraming | None = None,
     settings: HubSettings | None = None,
 ) -> ProcessedPhotoFiles:
     settings = settings or get_settings()
-    width = settings.default_width
-    height = settings.default_height
-    mode = mode if mode in {"fit", "fill", "crop"} else "fit"
+    framing = framing or PhotoFraming("fill" if mode == "crop" else mode)
+    processed, _focus = _render_framed_photo(source, framing, settings)
+    processed_path, preview_path, frame_path = _processed_paths(settings, photo_id)
+    png = _photo_png(processed)
+    raw, checksum = raw_photo_frame(processed)
+    write_asset(settings.data_dir, "processed", processed_path, png)
+    write_asset(settings.data_dir, "previews", preview_path, png)
+    write_asset(settings.data_dir, "frames", frame_path, raw)
+    return ProcessedPhotoFiles(
+        processed_path=processed_path,
+        preview_path=preview_path,
+        frame_path=frame_path,
+        width=processed.width,
+        height=processed.height,
+        checksum=checksum,
+        palette=WAVESHARE_7COLOR_6.name,
+    )
 
-    image = _decode_photo(original_path, native_mode=True)
+
+def _render_framed_photo(
+    source: Path | BinaryIO, framing: PhotoFraming, settings: HubSettings
+) -> tuple[Image.Image, tuple[float, float]]:
+    image = _decode_photo(source, native_mode=True)
     profile = _embedded_rgb_profile(image)
     if image.mode != "RGB":
         image = image.convert("RGB")
+    width, height = settings.default_width, settings.default_height
     size = (width, height)
-    if mode == "fit":
-        framed = ImageOps.contain(image, size, method=Image.Resampling.LANCZOS)
-    else:
-        framed = ImageOps.fit(image, size, method=Image.Resampling.LANCZOS, centering=(0.5, 0.5))
-
+    framed, focus = frame_photo(image, size, framing)
     processed = _normalize_rgb(framed, profile)
     if processed.size != size:
         # Match ImageOps.pad's center placement, adding the white border in sRGB.
@@ -175,31 +212,80 @@ def process_photo_file(
         offset = (round((width - processed.width) / 2), round((height - processed.height) / 2))
         canvas.paste(processed, offset)
         processed = canvas
+    return processed, focus
 
-    processed_path, preview_path, frame_path = _processed_paths(settings, photo_id)
-    for path in (processed_path, preview_path, frame_path):
-        path.parent.mkdir(parents=True, exist_ok=True)
 
+def _photo_png(processed: Image.Image) -> bytes:
     # The standard PNG marker also distinguishes new files from legacy padded
     # PNGs whose source profile was lost and can be recovered from the original.
     png_info = PngImagePlugin.PngInfo()
     png_info.add(b"sRGB", bytes([ImageCms.Intent.RELATIVE_COLORIMETRIC]))
     with BytesIO() as output:
         processed.save(output, format="PNG", pnginfo=png_info)
-        png = output.getvalue()
-    processed_path.write_bytes(png)
-    preview_path.write_bytes(png)
-    raw, checksum = raw_photo_frame(processed)
-    frame_path.write_bytes(raw)
-    return ProcessedPhotoFiles(
-        processed_path=processed_path,
-        preview_path=preview_path,
-        frame_path=frame_path,
-        width=width,
-        height=height,
-        checksum=checksum,
-        palette=WAVESHARE_7COLOR_6.name,
-    )
+        return output.getvalue()
+
+
+def photo_framing_preview(photo: Photo, framing: PhotoFraming) -> tuple[bytes, tuple[float, float]]:
+    settings = get_settings()
+    with open_asset(settings.data_dir, "originals", photo.original_path) as source:
+        if source is None or not 0 < fstat(source.fileno()).st_size <= MAX_UPLOAD_BYTES:
+            raise PhotoProcessingError("The original photo is unavailable.")
+        image, focus = _render_framed_photo(source, framing, settings)
+    return _photo_png(image), focus
+
+
+def update_photo_framing(
+    db: Session, photo: Photo, framing: PhotoFraming, *, revision: str
+) -> Photo:
+    from .playback import begin_playback_write
+
+    if photo_revision(photo) != revision:
+        raise PhotoEditConflict("This photo changed. Reopen the editor to load its current framing.")
+    if not photo.original_path or photo.processed_status != "ready":
+        raise PhotoProcessingError("The original photo is unavailable.")
+
+    settings = get_settings()
+    stem = uuid.uuid4().hex
+    original_path = photo.original_path
+    photo_id = photo.id
+    try:
+        with open_asset(settings.data_dir, "originals", original_path) as source:
+            if source is None or not 0 < fstat(source.fileno()).st_size <= MAX_UPLOAD_BYTES:
+                raise PhotoProcessingError("The original photo is unavailable.")
+            processed = process_photo_file(stem, source, framing=framing, settings=settings)
+        begin_playback_write(db)
+        current = db.get(Photo, photo_id, populate_existing=True)
+        if current is None or photo_revision(current) != revision or current.original_path != original_path:
+            raise PhotoEditConflict("This photo changed. Reopen the editor to load its current framing.")
+        db.add(PhotoRevision(
+            photo_id=current.id,
+            processed_path=current.processed_path,
+            preview_path=current.preview_path,
+            frame_path=current.frame_path,
+            checksum=current.checksum,
+            framing_json=current.framing_json,
+        ))
+        current.processed_path = str(processed.processed_path)
+        current.preview_path = str(processed.preview_path)
+        current.frame_path = str(processed.frame_path)
+        current.width, current.height = processed.width, processed.height
+        current.palette, current.checksum = processed.palette, processed.checksum
+        current.framing_json = json.dumps(asdict(framing))
+        db.commit()
+    except Exception as error:
+        try:
+            db.rollback()
+        finally:
+            paths = _processed_paths(settings, stem)
+            for directory, path in zip(("processed", "previews", "frames"), paths, strict=True):
+                try:
+                    remove_asset(settings.data_dir, directory, path)
+                except OSError:
+                    LOGGER.warning("Could not remove an asset from a failed framing edit.")
+        if isinstance(error, (OSError, SQLAlchemyError)):
+            raise PhotoProcessingError("Could not save this photo framing.") from error
+        raise
+    return current
 
 
 def _decode_photo(source: Path | BinaryIO, *, native_mode: bool = False) -> Image.Image:
@@ -325,18 +411,58 @@ def read_photo_asset(value: str | None, directory: str, *, limit: int = MAX_UPLO
     return read_asset(get_settings().data_dir, directory, value, limit)
 
 
+def sweep_untracked_photo_derivatives(db: Session, data_dir: Path, *, now: datetime) -> None:
+    """Collect aged generated derivatives during the hourly playback writer transaction."""
+    candidates = []
+    for directory, extension in (("processed", ".png"), ("previews", ".png"), ("frames", ".raw")):
+        try:
+            names = asset_names(data_dir, directory)
+        except OSError:
+            LOGGER.warning("Could not list generated photo assets for cleanup.")
+            continue
+        candidates.extend(
+            (directory, name) for name in names
+            if name.endswith(extension) and _PHOTO_DERIVATIVE_STEM.fullmatch(name[:-len(extension)])
+        )
+    if not candidates:
+        return
+    paths = (
+        Photo.processed_path, Photo.preview_path, Photo.frame_path, Photo.original_path,
+        PhotoRevision.processed_path, PhotoRevision.preview_path, PhotoRevision.frame_path, Frame.path,
+    )
+    # Protect a referenced name even when an old row spells the data path differently.
+    referenced = {
+        Path(path).name for path in db.scalars(union_all(*(select(column) for column in paths))) if path
+    }
+    cutoff = (now - _ORPHAN_DERIVATIVE_AGE).timestamp()
+    for directory, name in candidates:
+        if name in referenced:
+            continue
+        try:
+            remove_asset(data_dir, directory, data_dir / directory / name, older_than=cutoff)
+        except OSError:
+            LOGGER.warning("Could not remove an untracked generated photo derivative.")
+
+
 def delete_photo_record(db: Session, photo: Photo) -> None:
     data_dir = get_settings().data_dir
-    for directory, value in (
-        ("originals", photo.original_path),
-        ("processed", photo.processed_path),
-        ("previews", photo.preview_path),
-        ("frames", photo.frame_path),
-    ):
-        remove_asset(data_dir, directory, value)
+    revisions = db.scalars(select(PhotoRevision).where(PhotoRevision.photo_id == photo.id)).all()
+    assets = [("originals", photo.original_path)]
+    for item in (photo, *revisions):
+        assets.extend((
+            ("processed", item.processed_path),
+            ("previews", item.preview_path),
+            ("frames", item.frame_path),
+        ))
+    db.execute(delete(PhotoRevision).where(PhotoRevision.photo_id == photo.id))
     db.execute(delete(AlbumItem).where(AlbumItem.photo_id == photo.id))
     db.delete(photo)
     db.commit()
+    for directory, value in assets:
+        try:
+            remove_asset(data_dir, directory, value)
+        except OSError:
+            LOGGER.warning("Could not remove a deleted photo asset.")
 
 
 def create_album(db: Session, *, name: str, mode: str = "ordered") -> Album:

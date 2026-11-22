@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import json
 from copy import deepcopy
-from dataclasses import dataclass
+from dataclasses import asdict, dataclass
 from datetime import datetime, timezone
 from functools import lru_cache
 from typing import Any, Literal
@@ -14,6 +14,7 @@ from sqlalchemy.orm import Session
 
 from ..models import Dashboard, Device, HAEntityCache, Setting
 from .dashboard import SAMPLE_DASHBOARD, load_dashboard_yaml, validate_dashboard_config
+from .dashboard_calendar import calendar_id, calendar_scope, upcoming_agenda
 from .dashboard_sensors import UNAVAILABLE_STATES, dashboard_eligible, entity_attributes
 from .rendering import _font
 
@@ -29,6 +30,53 @@ class WidgetText:
     detail: str = ""
 
 
+class AgendaText(WidgetText):
+    """Text laid out as one event per line."""
+
+
+@dataclass(frozen=True)
+class PhotoOverlay:
+    config: dict[str, Any]
+    widgets: list[WidgetText]
+
+    @property
+    def snapshot(self) -> list[dict[str, Any]]:
+        return [
+            {"x": tile["x"], "y": tile["y"], "w": tile["w"],
+             "agenda": isinstance(widget, AgendaText), "text": asdict(widget)}
+            for tile, widget in zip(self.config["widgets"], self.widgets, strict=True)
+        ]
+
+    @classmethod
+    def from_snapshot(cls, snapshot: list[dict[str, Any]]) -> PhotoOverlay:
+        return cls(
+            {"widgets": snapshot},
+            [(AgendaText if tile["agenda"] else WidgetText)(**tile["text"]) for tile in snapshot],
+        )
+
+    def render(self, image: Image.Image) -> Image.Image:
+        overlay = Image.new("RGBA", (800, 480))
+        draw = ImageDraw.Draw(overlay)
+        for tile, widget in zip(self.config["widgets"], self.widgets, strict=True):
+            x = 17 + tile["x"] * 194
+            w = tile["w"] * 194 - 10
+            agenda = isinstance(widget, AgendaText)
+            lines = _agenda_lines(widget) if agenda else ()
+            h = 54 + len(lines) * 29 if agenda else 114
+            y = 462 - h if tile["y"] else 18
+            draw.rounded_rectangle((x, y, x + w, y + h), radius=12, fill=(255, 255, 255, 238),
+                                   outline=(0, 0, 0, 255), width=2)
+            _fit_text(draw, widget.label, (x + 13, y + 10), w - 26, 17, "black")
+            if agenda:
+                for i, line in enumerate(lines):
+                    _fit_text(draw, line, (x + 13, y + 40 + i * 29), w - 26, 22, "black")
+            else:
+                _fit_text(draw, widget.value, (x + 13, y + 39), w - 26, 33, "black")
+                if widget.detail:
+                    _fit_text(draw, widget.detail, (x + 13, y + 83), w - 26, 16, "black")
+        return Image.alpha_composite(image.convert("RGBA"), overlay).convert("RGB")
+
+
 def get_dashboard_record(db: Session, slug: str | None) -> Dashboard | None:
     return db.scalar(select(Dashboard).where(Dashboard.slug == (slug or "sample")))
 
@@ -40,6 +88,27 @@ def dashboard_config(record: Dashboard | None) -> dict[str, Any]:
 @lru_cache(maxsize=128)
 def _parsed_dashboard(source: str) -> dict[str, Any]:
     return validate_dashboard_config(load_dashboard_yaml(source))
+
+
+def resolve_photo_overlay(
+    db: Session,
+    overlay_id: str | None,
+    timestamp: datetime,
+    device: Device | None,
+    *,
+    observed_at: datetime | None = None,
+    time_kind: DashboardTimeKind = "scheduled",
+) -> PhotoOverlay | None:
+    if not overlay_id:
+        return None
+    record = get_dashboard_record(db, overlay_id)
+    if record is None and overlay_id != "sample":
+        return None
+    config = dashboard_config(record)
+    if not config["widgets"]:
+        return None
+    return PhotoOverlay(config, resolve_widget_text(db, config, timestamp, device, observed_at=observed_at,
+                                                    time_kind=time_kind))
 
 
 def resolve_widget_text(
@@ -60,6 +129,8 @@ def resolve_widget_text(
         local = timestamp.astimezone(ZoneInfo("UTC"))
     observed_at = observed_at or datetime.now(timezone.utc)
     widgets: list[WidgetText] = []
+    show_agenda = render_version == "current" and any(w["source"].get("type") == "calendar" for w in config["widgets"])
+    agenda_scope = calendar_scope(db) if show_agenda else None
     for widget in config["widgets"]:
         options = widget["options"]
         source = widget["source"]
@@ -77,6 +148,18 @@ def resolve_widget_text(
             else:
                 clock_label, detail = "Scheduled time", local.strftime("For %a, %b %d")
             widgets.append(WidgetText(label or clock_label, local.strftime("%H:%M"), detail))
+        elif source_type == "date" and render_version == "current":
+            widgets.append(WidgetText(label or "Date", local.strftime("%a, %b %d")))
+        elif source_type == "calendar" and render_version == "current":
+            rows = upcoming_agenda(
+                agenda_scope, calendar_id(source.get("entity_id")), local,
+                show_titles=options.get("show_event_titles") is True, limit=4 if widget["h"] > 1 else 3,
+            )
+            if rows:
+                widgets.append(AgendaText(label or "Upcoming events", rows[0], "\n".join(rows[1:])))
+            else:
+                value = "Calendar unavailable" if rows is None else "No events in the next 24 hours"
+                widgets.append(AgendaText(label or "Upcoming events", value))
         elif source_type == "location":
             zone = db.get(HAEntityCache, "zone.home")
             widgets.append(
@@ -154,10 +237,18 @@ def render_dashboard(config: dict[str, Any], widgets: list[WidgetText]) -> Image
         draw.rounded_rectangle((x, y, x + w, y + h), radius=12, outline=(0, 0, 0), width=2)
         draw.rectangle((x + 14, y + 17, x + 24, y + 27), fill=(255, 0, 0))
         _fit_text(draw, widget.label, (x + 34, y + 13), w - 49, 17, "black")
+        if isinstance(widget, AgendaText):
+            for i, line in enumerate(_agenda_lines(widget)):
+                _fit_text(draw, line, (x + 14, y + 52 + i * 34), w - 28, 24, "black")
+            continue
         _fit_text(draw, widget.value, (x + 14, y + 61), w - 28, 38, "black")
         if widget.detail:
             _fit_text(draw, widget.detail, (x + 15, y + 121), w - 30, 20, "black")
     return image
+
+
+def _agenda_lines(widget: WidgetText) -> tuple[str, ...]:
+    return (widget.value, *widget.detail.splitlines())
 
 
 def _fit_text(

@@ -1,0 +1,50 @@
+.photo-framing-editor h2 {
+  margin-block: 0 0.25rem;
+}
+
+.photo-framing-editor p {
+  overflow-wrap: anywhere;
+}
+
+.photo-framing-previews {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 0.75rem;
+}
+
+.photo-framing-previews figure {
+  margin: 0;
+  min-width: 0;
+}
+
+.photo-framing-previews img,
+.photo-framing-previews .preview-placeholder {
+  display: block;
+  width: 100%;
+  aspect-ratio: 5 / 3;
+  object-fit: contain;
+  border-radius: 0.5rem;
+  background: white;
+}
+
+.photo-framing-previews figcaption {
+  margin-top: 0.25rem;
+}
+
+.photo-framing-controls {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(min(11rem, 100%), 1fr));
+  gap: 0.75rem;
+  min-width: 0;
+}
+
+.photo-framing-controls input[type="range"] {
+  width: 100%;
+  min-width: 0;
+}
+
+@media (max-width: 550px) {
+  .photo-framing-previews {
+    grid-template-columns: minmax(0, 1fr);
+  }
+}

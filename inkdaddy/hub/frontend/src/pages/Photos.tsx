@@ -1,18 +1,22 @@
-import { useCallback, useEffect, useState, type FormEvent } from "react";
+import { useCallback, useEffect, useRef, useState, type FormEvent } from "react";
 import { apiJson, apiPath } from "../lib/api";
 import type { AlbumRecord, PhotoRecord, PlaybackSource } from "../lib/types";
+import { PhotoFramingEditor, type FramingPhoto } from "./PhotoFramingEditor";
 import { FramingOptions, type Framing } from "./SimplePages";
+import "./photos.css";
 
 type Album = AlbumRecord & { photos: PhotoRecord[] };
 type AlbumDraft = { id: string | null; name: string; photoIds: string[] };
 type UploadError = { filename: string | null; detail: string };
 
 export function PhotosPage({ onAddToPlaylist }: { onAddToPlaylist: (source: PlaybackSource) => void }) {
-  const [photos, setPhotos] = useState<PhotoRecord[]>([]);
+  const [photos, setPhotos] = useState<FramingPhoto[]>([]);
   const [albums, setAlbums] = useState<AlbumRecord[]>([]);
   const [selected, setSelected] = useState<Set<string>>(new Set());
   const [draft, setDraft] = useState<AlbumDraft | null>(null);
   const [renaming, setRenaming] = useState<{ id: string; name: string } | null>(null);
+  const [framingPhoto, setFramingPhoto] = useState<FramingPhoto | null>(null);
+  const framingTrigger = useRef<HTMLButtonElement>(null);
   const [mode, setMode] = useState<Framing | null>(null);
   const [libraryBusy, setLibraryBusy] = useState(true);
   const [loaded, setLoaded] = useState(false);
@@ -27,7 +31,7 @@ export function PhotosPage({ onAddToPlaylist }: { onAddToPlaylist: (source: Play
     setLibraryBusy(true);
     const queries = { signal };
     const results = await Promise.allSettled([
-      apiJson<{ photos: PhotoRecord[] }>("/api/photos", queries),
+      apiJson<{ photos: FramingPhoto[] }>("/api/photos", queries),
       apiJson<{ albums: AlbumRecord[] }>("/api/albums", queries),
       apiJson<{ photo_upload_mode: Framing }>("/api/settings", queries)
     ]);
@@ -57,7 +61,7 @@ export function PhotosPage({ onAddToPlaylist }: { onAddToPlaylist: (source: Play
       const body = new FormData();
       files.forEach((file) => body.append("files", file));
       if (mode) body.set("mode", mode);
-      const result = await apiJson<{ photos: PhotoRecord[]; errors: UploadError[] }>("/api/photos/batch", { method: "POST", body });
+      const result = await apiJson<{ photos: FramingPhoto[]; errors: UploadError[] }>("/api/photos/batch", { method: "POST", body });
       setPhotos((current) => [...result.photos].reverse().concat(current));
       setUploadErrors(result.errors);
       setMessage(result.photos.length ? `Added ${result.photos.length} ${result.photos.length === 1 ? "photo" : "photos"}.` : "");
@@ -108,7 +112,7 @@ export function PhotosPage({ onAddToPlaylist }: { onAddToPlaylist: (source: Play
     setBusy(true);
     setError("");
     try {
-      const photo = await apiJson<PhotoRecord>(`/api/photos/${renaming.id}`, {
+      const photo = await apiJson<FramingPhoto>(`/api/photos/${renaming.id}`, {
         method: "PUT",
         body: JSON.stringify({ name: renaming.name })
       });
@@ -166,7 +170,12 @@ export function PhotosPage({ onAddToPlaylist }: { onAddToPlaylist: (source: Play
     });
   }
 
-  const controlsBusy = busy || uploading || libraryBusy;
+  function closeFraming() {
+    setFramingPhoto(null);
+    window.requestAnimationFrame(() => framingTrigger.current?.focus());
+  }
+
+  const controlsBusy = busy || uploading || libraryBusy || framingPhoto !== null;
   const selectedPhoto = selected.size === 1 ? photos.find((photo) => selected.has(photo.id) && photo.frame_url) : null;
   const attachable = draft ? [...selected].filter((id) => !draft.photoIds.includes(id)) : [];
   const photoNames = new Map(photos.map((photo) => [photo.id, photo.original_filename]));
@@ -199,6 +208,13 @@ export function PhotosPage({ onAddToPlaylist }: { onAddToPlaylist: (source: Play
       {error && <p className="warning-text" role="alert">{error}</p>}
       {loadError && <div className="button-row"><p role="alert">{loadError}</p><button className="secondary-button" disabled={controlsBusy} onClick={() => void load()}>Retry loading</button></div>}
     </section>
+
+    {framingPhoto && <PhotoFramingEditor key={framingPhoto.id} photo={framingPhoto}
+      onCancel={closeFraming} onSaved={(photo) => {
+        setPhotos((current) => current.map((row) => row.id === photo.id ? photo : row));
+        closeFraming();
+        setMessage("Framing saved.");
+      }} />}
 
     <section className="content-layout photo-library">
       <aside className="side-stack photo-actions">
@@ -264,6 +280,12 @@ export function PhotosPage({ onAddToPlaylist }: { onAddToPlaylist: (source: Play
           </form> : <>
             <div className="asset-meta"><strong>{photo.original_filename}</strong><span>{photo.frame_url ? "Ready" : "Frame unavailable"}</span></div>
             <div className="button-row">
+              {photo.can_edit_framing && <button className="secondary-button" disabled={controlsBusy}
+                onClick={(event) => {
+                  setMessage("");
+                  framingTrigger.current = event.currentTarget;
+                  setFramingPhoto(photo);
+                }}>Edit framing</button>}
               <button className="secondary-button" disabled={controlsBusy} onClick={() => setRenaming({ id: photo.id, name: photo.original_filename })}>Rename</button>
               <button className="secondary-button" disabled={controlsBusy} onClick={() => void remove("photos", photo.id)}>Delete</button>
             </div>

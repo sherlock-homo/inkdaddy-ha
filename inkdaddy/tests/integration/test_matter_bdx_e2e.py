@@ -452,10 +452,15 @@ widgets:
     assert controller.cached_receipt(target, first.transfer_id)["state"] == "displayed"
     assert response_json(client.get(f"{route}/playback"))["current"] == pending_dashboard
 
+    updated_device = response_json(client.put(route, json={"refresh_interval_minutes": 25}))
+    assert updated_device["refresh_interval_minutes"] == 25
     worker.run_playback_cycle(now=clock.now)
-    warmed = response_json(client.get(f"{route}/playback"))["upcoming"][0]
+    queue = response_json(client.get(f"{route}/playback"))
+    assert queue["current"] == pending_dashboard
+    assert software.call("counts")["acceptance_count"] == 2
+    warmed = queue["upcoming"][0]
     assert warmed["source_id"] == hourly["id"]
-    clock.now = NOW.replace(minute=0) + timedelta(hours=1)
+    clock.now = NOW.replace(minute=50)
     assert datetime.fromisoformat(warmed["scheduled_at"]) == clock.now
     with sessions() as db:
         room = db.get(HAEntityCache, "sensor.room")
@@ -477,7 +482,7 @@ widgets:
         widgets = resolve_widget_text(
             db, config, clock.now, db.get(Device, device_id), observed_at=clock.now
         )
-        assert [widget.value for widget in widgets] == ["17:00", "24 °C"]
+        assert [widget.value for widget in widgets] == ["16:50", "24 °C"]
         expected_hourly, _digest = raw_frame_from_image(
             render_dashboard(config, widgets), dither=True
         )
@@ -537,7 +542,7 @@ widgets:
         widgets = resolve_widget_text(
             db, config, clock.now, db.get(Device, device_id), observed_at=clock.now, time_kind="manual",
         )
-        assert [widget.value for widget in widgets] == ["17:08", "24 °C"]
+        assert [widget.value for widget in widgets] == ["16:58", "24 °C"]
         assert widgets[0].detail.startswith("Requested ")
         expected_manual, _digest = raw_frame_from_image(render_dashboard(config, widgets), dither=True)
     assert expected_manual != expected_hourly

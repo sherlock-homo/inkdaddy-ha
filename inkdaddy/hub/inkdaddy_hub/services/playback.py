@@ -7,6 +7,7 @@ import sqlite3
 from collections import OrderedDict
 from dataclasses import asdict, dataclass
 from datetime import datetime, timedelta, timezone
+from itertools import chain
 from os import stat_result
 from pathlib import Path
 from time import monotonic
@@ -26,6 +27,7 @@ from ..models import (
     MatterFrameTransfer,
     MatterPlaybackIntent,
     Photo,
+    PhotoRevision,
     Playback,
     PlaybackOffer,
     PlaybackSlot,
@@ -33,13 +35,15 @@ from ..models import (
 )
 from .asset_storage import asset_names, asset_stat, read_asset, remove_asset, write_asset
 from .dashboard_content import (
+    PhotoOverlay,
     dashboard_config,
     get_dashboard_record,
     render_dashboard,
     resolve_widget_text,
+    resolve_photo_overlay,
 )
 from .palette import PHOTO_DITHER_VERSION, WAVESHARE_7COLOR_6, raw_frame_from_image, raw_photo_frame
-from .photos import load_color_managed_photo, load_processed_photo
+from .photos import load_color_managed_photo, load_processed_photo, sweep_untracked_photo_derivatives
 from .rendering import build_frame_manifest
 
 UPCOMING_SLOTS = 5
@@ -70,24 +74,38 @@ def begin_playback_write(db: Session) -> None:
         connection.execute(text("BEGIN IMMEDIATE"))
 
 
-def _hour(now: datetime) -> int:
-    return int(now.timestamp()) // 3600
+def epoch_minute(now: datetime) -> int:
+    return int(now.timestamp()) // 60
 
 
-def _hour_time(hour: int) -> datetime:
-    return datetime.fromtimestamp(hour * 3600, timezone.utc)
+def _refresh_interval(device: Device) -> int:
+    return device.refresh_interval_minutes or 60
+
+
+def _scheduled_minute(device: Device, playback: Playback | None, now: datetime) -> int:
+    minute = epoch_minute(now)
+    anchor = playback.anchor_minute if playback else 0
+    if playback and playback.first_new_interval_minute is not None:
+        if minute < playback.first_new_interval_minute:
+            return anchor
+        anchor = playback.first_new_interval_minute
+    return minute - (minute - anchor) % _refresh_interval(device)
+
+
+def scheduled_time(scheduled_minute: int) -> datetime:
+    return datetime.fromtimestamp(scheduled_minute * 60, timezone.utc)
 
 
 def _utc_now() -> datetime:
     return datetime.now(timezone.utc)
 
 
-def _get_playback(db: Session, device: Device, hour: int) -> Playback:
+def _get_playback(db: Session, device: Device, scheduled_minute: int) -> Playback:
     playback = db.get(Playback, device.id)
     if playback is None:
         playback = Playback(
             device_id=device.id,
-            anchor_hour=hour,
+            anchor_minute=scheduled_minute,
             anchor_position=0,
             paused=False,
             playlist_json="[]",
@@ -179,61 +197,94 @@ def update_playlist(
         if not exists:
             raise ValueError("A selected playlist item no longer exists.")
         sources.append(source)
-    hour = _hour(now or _utc_now())
-    playback = _get_playback(db, device, hour)
+    scheduled_minute = _scheduled_minute(device, db.get(Playback, device.id), now or _utc_now())
+    playback = _get_playback(db, device, scheduled_minute)
     playback.playlist_json = json.dumps([asdict(source) for source in sources])
-    playback.anchor_hour = hour
-    playback.anchor_position = 0
-    playback.manual_request_hour = playback.manual_requested_at = None
-    _invalidate_slot(db, device, hour)
+    _set_anchor(playback, scheduled_minute, 0)
+    playback.manual_request_minute = playback.manual_requested_at = None
+    _invalidate_slot(db, device, scheduled_minute)
     db.flush()
 
 
-def _position(playback: Playback, hour: int) -> int:
-    return playback.anchor_position + (
-        0 if playback.paused else max(0, hour - playback.anchor_hour)
-    )
+def _position(playback: Playback, scheduled_minute: int, interval: int) -> int:
+    if playback.paused or scheduled_minute <= playback.anchor_minute:
+        return playback.anchor_position
+    if playback.first_new_interval_minute is not None:
+        return playback.anchor_position + 1 + (scheduled_minute - playback.first_new_interval_minute) // interval
+    return playback.anchor_position + (scheduled_minute - playback.anchor_minute) // interval
+
+
+def _set_anchor(playback: Playback, scheduled_minute: int, position: int) -> None:
+    playback.anchor_minute = scheduled_minute
+    playback.anchor_position = position
+    first = playback.first_new_interval_minute
+    if first is not None and scheduled_minute >= first:
+        playback.first_new_interval_minute = None
+
+
+def _next_scheduled_minute(playback: Playback | None, due: int, interval: int) -> int:
+    first = playback.first_new_interval_minute if playback else None
+    return first if first is not None and first > due else due + interval
 
 
 def apply_playback_action(
     db: Session, device: Device, action: str, now: datetime | None = None
 ) -> None:
     requested_at = now or _utc_now()
-    hour = _hour(requested_at)
-    playback = _get_playback(db, device, hour)
+    scheduled_minute = _scheduled_minute(device, db.get(Playback, device.id), requested_at)
+    playback = _get_playback(db, device, scheduled_minute)
     if action not in ACTION_NAMES:
         raise ValueError("Unsupported display action.")
     if action == "refresh_current":
-        playback.manual_request_hour = playback.anchor_hour if playback.paused else hour
+        playback.manual_request_minute = playback.anchor_minute if playback.paused else scheduled_minute
         playback.manual_requested_at = requested_at.astimezone(timezone.utc).replace(tzinfo=None)
-        _invalidate_slot(db, device, playback.manual_request_hour)
+        _invalidate_slot(db, device, playback.manual_request_minute)
         invalidate_matter_transfer(db, device.id)
         return
     if (action == "pause" and playback.paused) or (action == "play" and not playback.paused):
         return
     offset = {"next_content": 1, "previous_content": -1}.get(action, 0)
-    playback.anchor_position = _position(playback, hour) + offset
-    playback.anchor_hour = hour
+    _set_anchor(playback, scheduled_minute, _position(playback, scheduled_minute, _refresh_interval(device)) + offset)
     if action in {"pause", "play"}:
         playback.paused = action == "pause"
     if offset:
-        playback.manual_request_hour = hour
+        playback.manual_request_minute = scheduled_minute
         playback.manual_requested_at = requested_at.astimezone(timezone.utc).replace(tzinfo=None)
-        _invalidate_slot(db, device, hour)
+        _invalidate_slot(db, device, scheduled_minute)
 
 
 def reset_selection(db: Session, device: Device, now: datetime | None = None) -> None:
     playback = db.get(Playback, device.id)
     if playback and not _playlist(playback):
-        playback.anchor_hour = _hour(now or _utc_now())
-        playback.anchor_position = 0
-        playback.manual_request_hour = playback.manual_requested_at = None
-        _invalidate_slot(db, device, playback.anchor_hour)
+        _set_anchor(playback, _scheduled_minute(device, playback, now or _utc_now()), 0)
+        playback.manual_request_minute = playback.manual_requested_at = None
+        _invalidate_slot(db, device, playback.anchor_minute)
 
 
-def _invalidate_slot(db: Session, device: Device, hour: int) -> None:
+def update_refresh_interval(
+    db: Session, device: Device, interval: int, now: datetime | None = None,
+) -> None:
+    """Change the cadence without skipping playlist entries or resetting paused playback."""
+    if interval == _refresh_interval(device):
+        return
+    timestamp = now or _utc_now()
+    playback = db.get(Playback, device.id)
+    if playback is not None:
+        due = _scheduled_minute(device, playback, timestamp)
+        position = _position(playback, due, _refresh_interval(device))
+        current = playback.anchor_minute if playback.paused else due
+        _set_anchor(playback, current, position)
+        elapsed = max(0, epoch_minute(timestamp) - due)
+        playback.first_new_interval_minute = due + (elapsed // interval + 1) * interval
+        db.execute(delete(PlaybackSlot).where(
+            PlaybackSlot.device_id == device.id, PlaybackSlot.scheduled_minute > current,
+        ))
+    device.refresh_interval_minutes = interval
+
+
+def _invalidate_slot(db: Session, device: Device, scheduled_minute: int) -> None:
     db.execute(
-        delete(PlaybackSlot).where(PlaybackSlot.device_id == device.id, PlaybackSlot.hour == hour)
+        delete(PlaybackSlot).where(PlaybackSlot.device_id == device.id, PlaybackSlot.scheduled_minute == scheduled_minute)
     )
 
 
@@ -241,8 +292,8 @@ def invalidate_matter_transfer(db: Session, device_id: int) -> None:
     db.execute(delete(MatterFrameTransfer).where(MatterFrameTransfer.device_id == device_id))
 
 
-def _manual_request_at(playback: Playback | None, hour: int) -> datetime | None:
-    if playback and playback.manual_request_hour == hour and playback.manual_requested_at is not None:
+def _manual_request_at(playback: Playback | None, scheduled_minute: int) -> datetime | None:
+    if playback and playback.manual_request_minute == scheduled_minute and playback.manual_requested_at is not None:
         return playback.manual_requested_at.replace(tzinfo=timezone.utc)
     return None
 
@@ -252,27 +303,31 @@ def refresh_playback_slots(
 ) -> PlaybackSlot:
     """Prepare the due frame and up to five future frames. Call inside a write transaction."""
     observed_at = now or _utc_now()
-    hour = _hour(observed_at)
-    playback = _get_playback(db, device, hour)
+    scheduled_minute = _scheduled_minute(device, db.get(Playback, device.id), observed_at)
+    playback = _get_playback(db, device, scheduled_minute)
     sources = _expand_playback(db, device, playback)
-    position = _position(playback, hour)
-    current_hour = playback.anchor_hour if playback.paused else hour
-    current = db.get(PlaybackSlot, (device.id, current_hour))
+    position = _position(playback, scheduled_minute, _refresh_interval(device))
+    current_minute = playback.anchor_minute if playback.paused else scheduled_minute
+    current = db.get(PlaybackSlot, (device.id, current_minute))
     if not current or not _slot_already_offered(db, current):
         current = _prepare_slot(
-            db, device, current_hour, sources[position % len(sources)],
-            observed_at=observed_at, manual_requested_at=_manual_request_at(playback, current_hour),
+            db, device, current_minute, sources[position % len(sources)],
+            observed_at=observed_at, manual_requested_at=_manual_request_at(playback, current_minute),
         )
     if upcoming:
+        interval = _refresh_interval(device)
+        next_minute = _next_scheduled_minute(playback, scheduled_minute, interval)
         for offset in range(1, UPCOMING_SLOTS + 1):
-            next_hour = hour + offset
-            _prepare_slot(db, device, next_hour, sources[(position + offset) % len(sources)], observed_at=observed_at)
-        preserve_current = PlaybackSlot.hour != current_hour
-        skipped_hour = PlaybackSlot.hour <= hour
-        skipped_future = PlaybackSlot.hour > hour + UPCOMING_SLOTS
+            _prepare_slot(
+                db, device, next_minute + (offset - 1) * interval,
+                sources[(position + offset) % len(sources)], observed_at=observed_at,
+            )
+        preserve_current = PlaybackSlot.scheduled_minute != current_minute
+        skipped_past = PlaybackSlot.scheduled_minute <= scheduled_minute
+        skipped_future = PlaybackSlot.scheduled_minute > next_minute + (UPCOMING_SLOTS - 1) * interval
         db.execute(
             delete(PlaybackSlot).where(
-                PlaybackSlot.device_id == device.id, preserve_current, skipped_hour | skipped_future
+                PlaybackSlot.device_id == device.id, preserve_current, skipped_past | skipped_future
             )
         )
     return current
@@ -283,7 +338,7 @@ def _slot_already_offered(db: Session, slot: PlaybackSlot) -> bool:
         select(PlaybackOffer.id)
         .where(
             PlaybackOffer.device_id == slot.device_id,
-            PlaybackOffer.hour == slot.hour,
+            PlaybackOffer.scheduled_minute == slot.scheduled_minute,
             PlaybackOffer.frame_id == slot.frame_id,
         )
         .limit(1)
@@ -304,11 +359,12 @@ def repair_playback_frame(db: Session, device: Device, slot: PlaybackSlot, frame
         or Path(frame.path) != _generated_frame_path(frame.frame_id)
     ):
         raise ValueError("The frame is outside the generated playback cache.")
-    manual_requested_at = (
-        _manual_request_at(db.get(Playback, device.id), slot.hour) if slot.source_type == "dashboard" else None
-    )
+    if slot.source_type == "photo":
+        _repair_photo_frame(db, slot, frame)
+        return
+    manual_requested_at = _manual_request_at(db.get(Playback, device.id), slot.scheduled_minute)
     _prepare_slot(
-        db, device, slot.hour, Source(slot.source_type, slot.source_id),
+        db, device, slot.scheduled_minute, Source(slot.source_type, slot.source_id),
         repair_frame=frame, manual_requested_at=manual_requested_at,
     )
 
@@ -316,17 +372,19 @@ def repair_playback_frame(db: Session, device: Device, slot: PlaybackSlot, frame
 def _prepare_slot(
     db: Session,
     device: Device,
-    hour: int,
+    scheduled_minute: int,
     source: Source,
     *,
     repair_frame: Frame | None = None,
     observed_at: datetime | None = None,
     manual_requested_at: datetime | None = None,
 ) -> PlaybackSlot:
-    slot = db.get(PlaybackSlot, (device.id, hour))
+    slot = db.get(PlaybackSlot, (device.id, scheduled_minute))
     photo = _ready_photo(db, source.id) if source.type == "photo" else None
     data_dir = get_settings().data_dir
     photo_metadata = asset_stat(data_dir, "processed", photo.processed_path) if photo else None
+    overlay = None
+    overlay_snapshot = None
     version: tuple[object, ...]
     if photo and photo_metadata:
         title = photo.original_filename
@@ -336,11 +394,19 @@ def _prepare_slot(
             PHOTO_DITHER_VERSION, _PHOTO_COLOR_VERSION,
             _photo_asset_signature(original_metadata) if original_metadata else None,
         )
+        overlay = resolve_photo_overlay(
+            db, device.overlay_dashboard_id, manual_requested_at or scheduled_time(scheduled_minute),
+            device, observed_at=observed_at,
+            time_kind="manual" if manual_requested_at is not None else "scheduled",
+        )
+        if overlay is not None:
+            overlay_snapshot = overlay.snapshot
+            version = (*version, "photo-overlay-v1", overlay_snapshot)
     else:
         source = Source("dashboard", source.id if source.type == "dashboard" else "sample")
         dashboard = get_dashboard_record(db, source.id)
         config = dashboard_config(dashboard)
-        timestamp = manual_requested_at or _hour_time(hour)
+        timestamp = manual_requested_at or scheduled_time(scheduled_minute)
         if repair_frame is not None and slot is not None and slot.manual_observed_at is not None:
             observed_at = slot.manual_observed_at.replace(tzinfo=timezone.utc)
         observed_at = observed_at or _utc_now()
@@ -365,7 +431,7 @@ def _prepare_slot(
     render_key = _render_key(version)
     frame = None
     if repair_frame is not None:
-        if slot is None or (not photo_metadata and slot.render_key != render_key):
+        if slot is None or slot.render_key != render_key:
             raise ValueError("The original frame can no longer be regenerated from its source.")
     else:
         if slot and slot.render_key == render_key:
@@ -390,17 +456,12 @@ def _prepare_slot(
         if photo and photo_metadata:
             image = _load_scheduled_photo(data_dir, photo, photo_metadata)
             if image is None:
-                if repair_frame is not None:
-                    raise ValueError("Could not read the original processed photo.")
                 return _prepare_slot(
-                    db, device, hour, Source("dashboard", "sample"),
+                    db, device, scheduled_minute, Source("dashboard", "sample"),
                     observed_at=observed_at, manual_requested_at=manual_requested_at,
                 )
-            if image.size != (800, 480):
-                image = image.resize((800, 480), Image.Resampling.LANCZOS)
+            image = _framed_photo(image, overlay)
             raw, checksum = raw_photo_frame(image)
-            if repair_frame is not None and checksum != repair_frame.sha256:
-                raw, checksum = _repair_previous_photo_bytes(data_dir, photo, repair_frame)
         else:
             image = render_dashboard(config, widgets)
             raw, checksum = raw_frame_from_image(image, dither=True)
@@ -412,13 +473,17 @@ def _prepare_slot(
             return slot
         frame = _store_frame(db, raw, image, source)
     if not slot:
-        slot = PlaybackSlot(device_id=device.id, hour=hour)
+        slot = PlaybackSlot(device_id=device.id, scheduled_minute=scheduled_minute)
         db.add(slot)
     slot.source_type = source.type
     slot.source_id = source.id
     slot.title = title
     slot.frame_id = frame.frame_id
     slot.render_key = render_key
+    slot.photo_render_json = (
+        json.dumps({"processed_path": photo.processed_path, "overlay": overlay_snapshot})
+        if photo and photo_metadata else None
+    )
     slot.manual_observed_at = (
         observed_at.astimezone(timezone.utc).replace(tzinfo=None)
         if source.type == "dashboard" and manual_requested_at is not None else None
@@ -427,15 +492,48 @@ def _prepare_slot(
     return slot
 
 
-def _repair_previous_photo_bytes(data_dir: Path, photo: Photo, frame: Frame) -> tuple[bytes, str]:
-    # Try older encodings only during repair. The caller still requires the offered full digest.
-    image = load_processed_photo(data_dir, photo.processed_path)
-    if image is None:
-        raise ValueError("Could not read the original processed photo.")
+def _framed_photo(image: Image.Image, overlay: PhotoOverlay | None) -> Image.Image:
     if image.size != (800, 480):
         image = image.resize((800, 480), Image.Resampling.LANCZOS)
-    raw, checksum = raw_photo_frame(image)
-    return (raw, checksum) if checksum == frame.sha256 else raw_frame_from_image(image, dither=True)
+    return overlay.render(image) if overlay is not None else image
+
+
+def _repair_photo_frame(db: Session, slot: PlaybackSlot, frame: Frame) -> None:
+    photo = db.get(Photo, int(slot.source_id)) if slot.source_id.isdigit() else None
+    if photo is None:
+        raise ValueError("The original photo is no longer available.")
+    try:
+        snapshot = json.loads(slot.photo_render_json) if slot.photo_render_json else {}
+        overlay = PhotoOverlay.from_snapshot(snapshot["overlay"]) if snapshot.get("overlay") else None
+    except (KeyError, TypeError, AttributeError, ValueError) as exc:
+        raise ValueError("The stored photo render could not be read.") from exc
+    snapshot_path = snapshot.get("processed_path")
+    data_dir = get_settings().data_dir
+    revisions = db.scalars(select(PhotoRevision.processed_path).where(
+        PhotoRevision.photo_id == photo.id, PhotoRevision.processed_path.is_not(None),
+    ).order_by(PhotoRevision.id.desc()).execution_options(yield_per=16))
+    paths = dict.fromkeys((snapshot_path, photo.processed_path))
+    for path in chain(paths, (path for path in revisions if path not in paths)):
+        if path is None:
+            continue
+        images = (
+            lambda: load_color_managed_photo(data_dir, path, photo.original_path),
+            lambda: load_processed_photo(data_dir, path),
+        )
+        for load_image in images:
+            image = load_image()
+            if image is None:
+                continue
+            image = _framed_photo(image, overlay)
+            renderers = (raw_photo_frame,) if overlay is not None else (
+                raw_photo_frame, lambda image: raw_frame_from_image(image, dither=True),
+            )
+            for render in renderers:
+                raw, checksum = render(image)
+                if checksum == frame.sha256 and checksum[:24] == frame.frame_id:
+                    _store_frame(db, raw, image, Source("photo", slot.source_id))
+                    return
+    raise ValueError("The regenerated frame does not match the original frame.")
 
 
 def _photo_frame_available(data_dir: Path, frame: Frame) -> bool:
@@ -510,8 +608,8 @@ def offer_slot(db: Session, slot: PlaybackSlot, *, now: datetime | None = None) 
         .order_by(PlaybackOffer.id.desc())
         .limit(1)
     )
-    if not latest or (latest.hour, latest.source_type, latest.source_id, latest.frame_id) != (
-        slot.hour,
+    if not latest or (latest.scheduled_minute, latest.source_type, latest.source_id, latest.frame_id) != (
+        slot.scheduled_minute,
         slot.source_type,
         slot.source_id,
         slot.frame_id,
@@ -519,7 +617,7 @@ def offer_slot(db: Session, slot: PlaybackSlot, *, now: datetime | None = None) 
         db.add(
             PlaybackOffer(
                 device_id=slot.device_id,
-                hour=slot.hour,
+                scheduled_minute=slot.scheduled_minute,
                 source_type=slot.source_type,
                 source_id=slot.source_id,
                 title=slot.title,
@@ -559,7 +657,7 @@ def _active_transfer_for_slot(db: Session, slot: PlaybackSlot) -> MatterFrameTra
             MatterFrameTransfer.device_id == slot.device_id,
             MatterFrameTransfer.render_key == slot.render_key,
             PlaybackOffer.device_id == slot.device_id,
-            PlaybackOffer.hour == slot.hour,
+            PlaybackOffer.scheduled_minute == slot.scheduled_minute,
             PlaybackOffer.frame_id == slot.frame_id,
         )
     )
@@ -588,9 +686,9 @@ def record_matter_transfer_failure(
     db: Session, device: Device, transfer_id: str, *, now: datetime | None = None
 ) -> bool:
     """Record terminal failure for the current unconfirmed transfer in a write transaction."""
-    hour = _hour(now or _utc_now())
     playback = db.get(Playback, device.id)
-    due = playback.anchor_hour if playback and playback.paused else hour
+    scheduled_minute = _scheduled_minute(device, playback, now or _utc_now())
+    due = playback.anchor_minute if playback and playback.paused else scheduled_minute
     slot = db.get(PlaybackSlot, (device.id, due))
     if slot is None:
         return False
@@ -610,14 +708,14 @@ def record_matter_transfer_failure(
 
 
 def playback_status(db: Session, device: Device, now: datetime | None = None) -> dict[str, object]:
-    hour = _hour(now or _utc_now())
     playback = db.get(Playback, device.id)
+    scheduled_minute = _scheduled_minute(device, playback, now or _utc_now())
     current = (
         db.get(PlaybackOffer, playback.current_offer_id)
         if playback and playback.current_offer_id
         else None
     )
-    due = playback.anchor_hour if playback and playback.paused else hour
+    due = playback.anchor_minute if playback and playback.paused else scheduled_minute
     pending = db.get(PlaybackSlot, (device.id, due))
     active = _active_transfer_for_slot(db, pending) if pending else None
     awaiting = active if active and active.acknowledged_at is None else None
@@ -628,14 +726,16 @@ def playback_status(db: Session, device: Device, now: datetime | None = None) ->
             if awaiting and matter_transfer_failed(db, device.id, awaiting.transfer_id)
             else "waiting"
         )
+    interval = _refresh_interval(device)
+    next_minute = _next_scheduled_minute(playback, scheduled_minute, interval)
     upcoming = db.scalars(
         select(PlaybackSlot)
         .where(
             PlaybackSlot.device_id == device.id,
-            PlaybackSlot.hour > hour,
-            PlaybackSlot.hour <= hour + UPCOMING_SLOTS,
+            PlaybackSlot.scheduled_minute >= next_minute,
+            PlaybackSlot.scheduled_minute <= next_minute + (UPCOMING_SLOTS - 1) * interval,
         )
-        .order_by(PlaybackSlot.hour)
+        .order_by(PlaybackSlot.scheduled_minute)
     )
     return {
         "paused": playback.paused if playback else False,
@@ -650,7 +750,7 @@ def playback_status(db: Session, device: Device, now: datetime | None = None) ->
 
 def _slot_payload(device: Device, slot: PlaybackSlot | PlaybackOffer) -> dict[str, str]:
     return {
-        "scheduled_at": _hour_time(slot.hour).isoformat(),
+        "scheduled_at": scheduled_time(slot.scheduled_minute).isoformat(),
         "source_type": slot.source_type,
         "source_id": slot.source_id,
         "title": slot.title,
@@ -733,10 +833,11 @@ def prune_playback(db: Session, now: datetime | None = None) -> None:
             remove_asset(data_dir, "frames", cache_path)
         db.delete(frame)
 
-    _sweep_untracked_assets(db, data_dir, cache_dir, _hour(now))
+    _sweep_untracked_assets(db, data_dir, cache_dir, now)
 
 
-def _sweep_untracked_assets(db: Session, data_dir: Path, cache_dir: Path, hour: int) -> None:
+def _sweep_untracked_assets(db: Session, data_dir: Path, cache_dir: Path, now: datetime) -> None:
+    hour = int(now.timestamp()) // 3600
     last_sweep = db.get(Setting, _ASSET_SWEEP_KEY)
     if last_sweep and last_sweep.value_json == str(hour):
         return
@@ -753,6 +854,7 @@ def _sweep_untracked_assets(db: Session, data_dir: Path, cache_dir: Path, hour: 
         for name in names:
             if _GENERATED_RAW_NAME.fullmatch(name) and name[:-4] not in referenced:
                 remove_asset(data_dir, "frames", cache_dir / name)
+    sweep_untracked_photo_derivatives(db, data_dir, now=now)
     if last_sweep:
         last_sweep.value_json = str(hour)
     else:
