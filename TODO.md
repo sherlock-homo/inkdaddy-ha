@@ -6,7 +6,7 @@
 
 - [x] Back up the local app, switch the installed App Store version to the existing private app data, and prevent both instances from claiming the Matter port.
 - [x] Confirm Supervisor-managed Ingress, the existing Matter fabric and device identity, photos, dashboards, playback state, and all five cached frames. Prove a fresh authenticated frame receipt and inspect the panel.
-- [ ] Verify the V1 version builds and updates from the repository without losing user data. Keep the local rollback copy private.
+- [x] Verify the V1 version builds and updates from the repository without losing user data. Keep the local rollback copy private.
 
 ### App tabs
 
@@ -33,6 +33,7 @@
 ### V1 candidate benchmarks
 
 - The pinned app build passed 134 Python tests, including four authenticated Matter CASE/BDX cases, and six controller tests. Chromium exercised managed app workflows at 393 px and the no-code editor at desktop, 390 px and 320 px. Preview rendering, keyboard editing and byte-for-byte YAML export passed.
+- An amd64 Home Assistant App Store update preserved the data and Matter pairing. The panel confirmed a manually refreshed photo in about 62 seconds, and a camera check verified the physical image. The app retained all five upcoming slots.
 - The six-color renderer averaged about 15 ms per synthetic color frame. Estimated color error dropped 79–93% on the synthetic fixtures. The color samples each used 128,000 transfer bytes. The grayscale sample used 102,486 bytes. Actual panel color has yet to be measured.
 - An idle hub benchmark eliminated 48 MB of application-level frame reads per 250 checks. Median run time fell from 290 ms to 256 ms. The picker browsed 5,000 cached rows in 3.94 ms median and made zero Home Assistant requests. See the hardware acceptance items for LiPo and Thread measurements.
 - Gitleaks found no secrets in the staged tree, reachable history or built application files. Bandit reported no medium or high findings. The Python and npm lock audits returned zero known vulnerabilities, and the npm registry signature checks passed. The app verifies Supervisor 2026.11.0 or later before enabling Ingress and the Matter controller.
