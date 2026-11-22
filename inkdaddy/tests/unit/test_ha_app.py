@@ -223,4 +223,34 @@ def test_entity_cache_schema_migrates_existing_rows_idempotently(monkeypatch):
     assert [column["name"] for column in inspect(engine).get_columns("ha_entity_cache")].count("source_reported_at") == 1
     with engine.connect() as connection:
         assert connection.exec_driver_sql("SELECT * FROM ha_entity_cache").one() == ("weather.test", None)
+
+
+def test_playback_clock_schema_migrates_existing_rows_idempotently(monkeypatch):
+    from inkdaddy_hub import database
+    from inkdaddy_hub.models import Playback, PlaybackSlot
+
+    engine = create_engine("sqlite://")
+    Base.metadata.create_all(engine)
+    with engine.begin() as connection:
+        connection.exec_driver_sql("ALTER TABLE playback DROP COLUMN manual_request_hour")
+        connection.exec_driver_sql("ALTER TABLE playback DROP COLUMN manual_requested_at")
+        connection.exec_driver_sql("ALTER TABLE playback_slots DROP COLUMN manual_observed_at")
+        connection.exec_driver_sql(
+            "INSERT INTO playback (device_id, playlist_json, anchor_hour, anchor_position, paused) "
+            "VALUES (1, '[]', 7, 2, 1)"
+        )
+        connection.exec_driver_sql(
+            "INSERT INTO playback_slots (device_id, hour, source_type, source_id, title, frame_id, render_key) "
+            "VALUES (1, 7, 'dashboard', 'sample', 'Home Overview', 'old-frame', 'old-render')"
+        )
+    monkeypatch.setattr(database, "engine", engine)
+    database.init_db()
+    database.init_db()
+    with Session(engine) as db:
+        state = db.get(Playback, 1)
+        slot = db.get(PlaybackSlot, (1, 7))
+        assert state.paused and (state.anchor_hour, state.anchor_position) == (7, 2)
+        assert state.manual_request_hour is state.manual_requested_at is None
+        assert (slot.frame_id, slot.render_key) == ("old-frame", "old-render")
+        assert slot.manual_observed_at is None
     engine.dispose()

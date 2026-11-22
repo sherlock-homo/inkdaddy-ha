@@ -33,9 +33,17 @@ def init_db() -> None:
         if connection.dialect.name == "sqlite":
             connection.exec_driver_sql("BEGIN IMMEDIATE")
         Base.metadata.create_all(bind=connection)
-        columns = {column["name"] for column in inspect(connection).get_columns("ha_entity_cache")}
-        if "source_reported_at" not in columns:
-            connection.exec_driver_sql("ALTER TABLE ha_entity_cache ADD COLUMN source_reported_at TIMESTAMP")
+        schema = inspect(connection)
+        migrations = {
+            "ha_entity_cache": {"source_reported_at": "TIMESTAMP"},
+            "playback": {"manual_request_hour": "INTEGER", "manual_requested_at": "TIMESTAMP"},
+            "playback_slots": {"manual_observed_at": "TIMESTAMP"},
+        }
+        for table, additions in migrations.items():
+            columns = {column["name"] for column in schema.get_columns(table)}
+            for name, type_sql in additions.items():
+                if name not in columns:
+                    connection.exec_driver_sql(f"ALTER TABLE {table} ADD COLUMN {name} {type_sql}")
 
 
 def get_db() -> Generator[Session, None, None]:

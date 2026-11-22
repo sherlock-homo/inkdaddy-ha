@@ -528,10 +528,20 @@ widgets:
         assert {json.loads(row.detail_json)["transport"] for row in receipts} == {"matter"}
     assert software.call("counts") == {"acceptance_count": 3, "receipt_reads": 0}
 
+    clock.now += timedelta(minutes=8)
     response_json(client.post(f"{route}/manual-refresh", params={"action": "refresh_current"}))
     rejected = matter_delivery.deliver_frame(controller, device_id, target, None, now=2_815)
     assert rejected is not None and rejected.transfer_id != third.transfer_id
-    expect_download(software, rejected.transfer_id, expected_hourly)
+    with sessions() as db:
+        config = dashboard_config(get_dashboard_record(db, hourly["id"]))
+        widgets = resolve_widget_text(
+            db, config, clock.now, db.get(Device, device_id), observed_at=clock.now, time_kind="manual",
+        )
+        assert [widget.value for widget in widgets] == ["17:08", "24 °C"]
+        assert widgets[0].detail.startswith("Requested ")
+        expected_manual, _digest = raw_frame_from_image(render_dashboard(config, widgets), dither=True)
+    assert expected_manual != expected_hourly
+    expect_download(software, rejected.transfer_id, expected_manual)
     software.call("emit_receipt", transfer_id=rejected.transfer_id, state=3, battery=12)
     wait_for_cached_receipt(controller, target, rejected.transfer_id, "failed")
     retry = matter_delivery.deliver_frame(controller, device_id, target, rejected, now=2_820)

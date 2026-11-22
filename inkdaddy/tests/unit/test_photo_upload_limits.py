@@ -2,11 +2,12 @@ from __future__ import annotations
 
 import asyncio
 from io import BytesIO
+from pathlib import Path
 
 import pytest
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
-from PIL import Image
+from PIL import Image, ImageCms, ImageOps, PngImagePlugin
 from sqlalchemy import create_engine, select
 from sqlalchemy.orm import Session
 
@@ -108,6 +109,163 @@ def test_uploaded_photo_frame_uses_the_photo_renderer(photo_app):
     assert downloaded.content == expected
     assert len(downloaded.content) == 192_000
     assert metadata["checksum"] == digest
+
+
+# DisplayP3-v4.icc is CC0 from saucecontrol/Compact-ICC-Profiles.
+# Source and license at https://github.com/saucecontrol/Compact-ICC-Profiles/tree/bdd84663061bc4ae95ca70decff54f581e27f702
+_DISPLAY_P3 = Path(__file__).resolve().parents[1] / "fixtures" / "DisplayP3-v4.icc"
+_WARM_P3 = (190, 116, 102)
+
+
+@pytest.mark.parametrize("mode", ["fit", "fill", "crop"])
+def test_wide_gamut_upload_keeps_preview_and_panel_in_the_same_color_space(
+    photo_app, tmp_path, monkeypatch, mode
+):
+    client, engine = photo_app
+    image = Image.new("RGB", (320, 480), _WARM_P3)
+    exif = Image.Exif()
+    exif[271] = "Synthetic camera"
+    metadata = PngImagePlugin.PngInfo()
+    metadata.add_itxt("XML:com.adobe.xmp", "Synthetic metadata")
+    with BytesIO() as output:
+        image.save(
+            output, format="PNG", icc_profile=_DISPLAY_P3.read_bytes(),
+            exif=exif, pnginfo=metadata, dpi=(72, 72),
+        )
+        supplied = output.getvalue()
+    uploaded = client.post(
+        "/api/photos", data={"mode": mode}, files={"file": ("tone.png", supplied, "image/png")}
+    )
+    assert uploaded.status_code == 200
+    record = uploaded.json()
+    preview = client.get(record["preview_url"])
+    with Image.open(BytesIO(preview.content)) as rendered:
+        assert rendered.size == (800, 480)
+        assert rendered.info == {"srgb": 1}
+        assert not rendered.getexif()
+        assert rendered.getpixel((400, 240)) == pytest.approx((202, 111, 98), abs=1)
+        assert (rendered.getpixel((10, 240)) == (255, 255, 255)) is (mode == "fit")
+        expected, digest = raw_photo_frame(rendered)
+    downloaded = client.get(record["frame_url"])
+    assert downloaded.content == expected
+    assert len(downloaded.content) == 192_000
+    pigments = {value for byte in downloaded.content for value in (byte >> 4, byte & 15)}
+    assert pigments <= {0, 1, 2, 3, 5, 6}
+    assert record["checksum"] == digest
+
+    def forbidden_original(*_args):
+        pytest.fail("A normalized derivative must not reopen its original ICC profile.")
+
+    monkeypatch.setattr(photos, "_original_rgb_profile", forbidden_original)
+    with Session(engine) as db:
+        photo = db.get(Photo, int(record["id"]))
+        assert Path(photo.original_path).read_bytes() == supplied
+        assert Path(photo.processed_path).read_bytes() == preview.content
+        scheduled = photos.load_color_managed_photo(tmp_path, photo.processed_path, photo.original_path)
+    assert scheduled is not None
+    assert raw_photo_frame(scheduled) == (expected, digest)
+
+
+@pytest.mark.parametrize("profile_location", ["processed", "original", "outside"])
+def test_legacy_photo_normalization_uses_managed_profile_metadata_and_keeps_framing(
+    tmp_path, monkeypatch, profile_location
+):
+    profiles = _DISPLAY_P3.read_bytes()
+    originals = tmp_path / "originals"
+    originals.mkdir()
+    file = originals / "source.png"
+    image = Image.new("RGB", (320, 480), _WARM_P3)
+    if profile_location == "outside":
+        outside = tmp_path / "source.png"
+        image.save(outside, icc_profile=profiles)
+        file.symlink_to(outside)
+    else:
+        image.save(file, icc_profile=profiles)
+    framed = ImageOps.pad(image, (800, 480), color="white")
+    processed = tmp_path / "processed" / "legacy.png"
+    processed.parent.mkdir()
+    framed.save(processed, icc_profile=profiles if profile_location == "processed" else None)
+
+    open_image = Image.open
+    original_opened = []
+
+    def metadata_only(source, *args, **kwargs):
+        opened = open_image(source, *args, **kwargs)
+        if getattr(source, "name", None) == file.name:
+            original_opened.append(True)
+
+            def forbid_decode(*_args):
+                pytest.fail("Legacy ICC recovery should not decode the original raster.")
+
+            monkeypatch.setattr(opened, "load", forbid_decode)
+        return opened
+
+    monkeypatch.setattr(photos.Image, "open", metadata_only)
+    normalized = photos.load_color_managed_photo(tmp_path, str(processed), str(file))
+    assert normalized is not None
+    assert normalized.size == (800, 480)
+    assert normalized.getpixel((10, 240)) == (255, 255, 255)
+    assert original_opened == ([True] if profile_location == "original" else [])
+    if profile_location == "outside":
+        assert normalized.getpixel((400, 240)) == _WARM_P3
+    else:
+        assert normalized.getpixel((400, 240)) == pytest.approx((202, 111, 98), abs=1)
+    legacy = photos.load_processed_photo(tmp_path, str(processed))
+    assert legacy is not None and legacy.tobytes() == framed.tobytes()
+
+
+@pytest.mark.parametrize("condition", ["sRGB", "untagged", "malformed", "mismatched", "oversized", "unavailable"])
+def test_color_management_profiles_keep_the_srgb_fallback_deterministic(tmp_path, monkeypatch, condition):
+    fixture = tmp_path / "input.png"
+    profile = _DISPLAY_P3.read_bytes()
+    if condition == "sRGB":
+        profile = ImageCms.ImageCmsProfile(ImageCms.createProfile("sRGB")).tobytes()
+    elif condition == "untagged":
+        profile = None
+    elif condition == "mismatched":
+        profile = ImageCms.ImageCmsProfile(ImageCms.createProfile("LAB")).tobytes()
+    elif condition == "malformed":
+        profile = b"invalid fixture profile"
+    elif condition == "oversized":
+        monkeypatch.setattr(photos, "MAX_ICC_PROFILE_BYTES", len(profile) - 1)
+    elif condition == "unavailable":
+        def unavailable(*_args):
+            raise ImportError("LittleCMS deliberately disabled.")
+        monkeypatch.setattr(photos.ImageCms, "getOpenProfile", unavailable)
+
+    image = Image.new("RGB", (800, 480), _WARM_P3)
+    image.save(fixture, icc_profile=profile)
+    output = photos.process_photo_file("fixture", fixture, settings=HubSettings(data_dir=tmp_path))
+    raw, digest = raw_photo_frame(image)
+    assert output.frame_path.read_bytes() == raw
+    assert output.checksum == digest
+    with Image.open(output.preview_path) as preview:
+        assert preview.getpixel((400, 240)) == _WARM_P3
+        assert preview.info.get("srgb") == 1 and "icc_profile" not in preview.info
+
+
+@pytest.mark.parametrize(("start", "field"), [
+    (0, b"\0\0\0\0"),  # Declared size.
+    (12, b"link"),  # Device-link profile instead of an image color space.
+    (36, b"none"),  # Missing ICC signature.
+    (128, b"\0\0\0\0"),  # Empty tag table.
+    (136, b"\0\0\0\0"),  # Tag points inside the header and table.
+    (140, b"\0\0\x10\0"),  # Tag extends beyond the embedded profile.
+])
+def test_bad_icc_header_and_tag_bounds_fall_back_before_native_parse(tmp_path, monkeypatch, start, field):
+    profile = bytearray(_DISPLAY_P3.read_bytes())
+    profile[start:start + len(field)] = field
+    fixture = tmp_path / "input.png"
+    Image.new("RGB", (320, 480), _WARM_P3).save(fixture, icc_profile=bytes(profile))
+
+    def not_parsed(*_args):
+        pytest.fail("Invalid ICC metadata should be screened before the native parser.")
+
+    monkeypatch.setattr(photos.ImageCms, "getOpenProfile", not_parsed)
+    output = photos.process_photo_file("fixture", fixture, settings=HubSettings(data_dir=tmp_path))
+    with Image.open(output.preview_path) as preview:
+        assert preview.getpixel((400, 240)) == _WARM_P3
+        assert preview.info.get("srgb") == 1 and "icc_profile" not in preview.info
 
 
 @pytest.mark.parametrize(("limit", "value"), [("MAX_IMAGE_PIXELS", 9), ("MAX_IMAGE_DIMENSION", 3)])

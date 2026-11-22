@@ -4,20 +4,22 @@ import logging
 import re
 import uuid
 from dataclasses import dataclass
+from functools import lru_cache
 from io import BytesIO
+from os import fstat
 from pathlib import Path
+from struct import iter_unpack
 from typing import BinaryIO
 
-from PIL import Image, ImageOps
+from PIL import Image, ImageCms, ImageOps, PngImagePlugin
 from sqlalchemy import delete, func, select
 from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.orm import Session
 
 from ..config import HubSettings, get_settings
 from ..models import Album, AlbumItem, Photo
-from .asset_storage import read_asset, remove_asset
+from .asset_storage import open_asset, read_asset, remove_asset
 from .palette import WAVESHARE_7COLOR_6, raw_photo_frame
-from .rendering import render_preview_png_bytes
 
 LOGGER = logging.getLogger(__name__)
 ALLOWED_EXTENSIONS = {".jpg", ".jpeg", ".png", ".webp", ".bmp"}
@@ -26,6 +28,9 @@ MAX_UPLOAD_BYTES = 32 * 1024 * 1024
 MAX_BATCH_BYTES = 128 * 1024 * 1024
 MAX_IMAGE_DIMENSION = 16_384
 MAX_IMAGE_PIXELS = 50_000_000
+MAX_ICC_PROFILE_BYTES = 1024 * 1024
+_RGB_PHOTO_MODES = {"RGB", "RGBA", "RGBX", "P", "PA"}
+_RGB_ICC_CLASSES = {b"scnr", b"mntr", b"prtr", b"spac"}
 
 
 class PhotoProcessingError(ValueError):
@@ -153,27 +158,37 @@ def process_photo_file(
     height = settings.default_height
     mode = mode if mode in {"fit", "fill", "crop"} else "fit"
 
-    image = _decode_photo(original_path)
-
-    if mode == "fill":
-        processed = ImageOps.fit(image, (width, height), method=Image.Resampling.LANCZOS, centering=(0.5, 0.5))
-    elif mode == "crop":
-        processed = ImageOps.fit(image, (width, height), method=Image.Resampling.LANCZOS, centering=(0.5, 0.5))
+    image = _decode_photo(original_path, native_mode=True)
+    profile = _embedded_rgb_profile(image)
+    if image.mode != "RGB":
+        image = image.convert("RGB")
+    size = (width, height)
+    if mode == "fit":
+        framed = ImageOps.contain(image, size, method=Image.Resampling.LANCZOS)
     else:
-        processed = ImageOps.pad(
-            image,
-            (width, height),
-            method=Image.Resampling.LANCZOS,
-            color=(255, 255, 255),
-            centering=(0.5, 0.5),
-        )
+        framed = ImageOps.fit(image, size, method=Image.Resampling.LANCZOS, centering=(0.5, 0.5))
+
+    processed = _normalize_rgb(framed, profile)
+    if processed.size != size:
+        # Match ImageOps.pad's center placement, adding the white border in sRGB.
+        canvas = Image.new("RGB", size, "white")
+        offset = (round((width - processed.width) / 2), round((height - processed.height) / 2))
+        canvas.paste(processed, offset)
+        processed = canvas
 
     processed_path, preview_path, frame_path = _processed_paths(settings, photo_id)
     for path in (processed_path, preview_path, frame_path):
         path.parent.mkdir(parents=True, exist_ok=True)
 
-    processed.save(processed_path, format="PNG")
-    preview_path.write_bytes(render_preview_png_bytes(processed))
+    # The standard PNG marker also distinguishes new files from legacy padded
+    # PNGs whose source profile was lost and can be recovered from the original.
+    png_info = PngImagePlugin.PngInfo()
+    png_info.add(b"sRGB", bytes([ImageCms.Intent.RELATIVE_COLORIMETRIC]))
+    with BytesIO() as output:
+        processed.save(output, format="PNG", pnginfo=png_info)
+        png = output.getvalue()
+    processed_path.write_bytes(png)
+    preview_path.write_bytes(png)
     raw, checksum = raw_photo_frame(processed)
     frame_path.write_bytes(raw)
     return ProcessedPhotoFiles(
@@ -187,7 +202,7 @@ def process_photo_file(
     )
 
 
-def _decode_photo(source: Path | BinaryIO) -> Image.Image:
+def _decode_photo(source: Path | BinaryIO, *, native_mode: bool = False) -> Image.Image:
     try:
         with Image.open(source, formats=ALLOWED_RASTER_FORMATS) as opened:
             source_width, source_height = opened.size
@@ -197,11 +212,87 @@ def _decode_photo(source: Path | BinaryIO) -> Image.Image:
                 or source_width * source_height > MAX_IMAGE_PIXELS
             ):
                 raise PhotoProcessingError("Uploaded image dimensions exceed the supported limit.")
-            return ImageOps.exif_transpose(opened).convert("RGB")
+            image = ImageOps.exif_transpose(opened)
+            return image if native_mode else image.convert("RGB")
+    except PhotoProcessingError:
+        raise
     except (Image.DecompressionBombError, Image.DecompressionBombWarning) as exc:
         raise PhotoProcessingError("Uploaded image dimensions exceed the supported limit.") from exc
-    except (OSError, SyntaxError) as exc:
+    except (OSError, SyntaxError, ValueError) as exc:
         raise PhotoProcessingError("Uploaded file is not a supported image.") from exc
+
+
+def _embedded_rgb_profile(image: Image.Image) -> bytes | None:
+    profile = image.info.get("icc_profile")
+    if (
+        image.mode in _RGB_PHOTO_MODES
+        and isinstance(profile, bytes)
+        and 0 < len(profile) <= MAX_ICC_PROFILE_BYTES
+    ):
+        return profile
+    return None
+
+
+@lru_cache(maxsize=1)
+def _srgb_profile() -> ImageCms.ImageCmsProfile:
+    return ImageCms.ImageCmsProfile(ImageCms.createProfile("sRGB"))
+
+
+def _valid_rgb_icc(profile: bytes) -> bool:
+    # ICC profiles use a 128-byte header followed by a tag count and tag table.
+    length = len(profile)
+    if (
+        not 132 <= length <= MAX_ICC_PROFILE_BYTES
+        or int.from_bytes(profile[:4], "big") != length
+        or profile[12:16] not in _RGB_ICC_CLASSES
+        or profile[16:20] != b"RGB "
+        or profile[20:24] not in (b"XYZ ", b"Lab ")
+        or profile[36:40] != b"acsp"
+    ):
+        return False
+    count = int.from_bytes(profile[128:132], "big")
+    table_end = 132 + count * 12
+    if count == 0 or table_end > length:
+        return False
+    tags = iter_unpack(">4sII", memoryview(profile)[132:table_end])
+    return all(
+        offset % 4 == 0 and offset >= table_end and size >= 8 and offset + size <= length
+        for _name, offset, size in tags
+    )
+
+
+def _normalize_rgb(image: Image.Image, profile: bytes | None) -> Image.Image:
+    if profile and min(image.size) > 0 and _valid_rgb_icc(profile):
+        try:
+            source = ImageCms.getOpenProfile(BytesIO(profile))
+            if source.profile.xcolor_space.strip() == "RGB":
+                normalized = ImageCms.profileToProfile(
+                    image,
+                    source,
+                    _srgb_profile(),
+                    renderingIntent=ImageCms.Intent.RELATIVE_COLORIMETRIC,
+                    outputMode="RGB",
+                    flags=ImageCms.Flags.BLACKPOINTCOMPENSATION,
+                )
+                if normalized is not None:
+                    image = normalized
+        except (ImageCms.PyCMSError, ImportError):
+            # Keep the RGB samples if the embedded profile is invalid or unavailable.
+            pass
+    # Derivatives keep pixels only. The original retains its original metadata.
+    image.info.clear()
+    return image
+
+
+def _original_rgb_profile(data_dir: Path, value: str | None) -> bytes | None:
+    try:
+        with open_asset(data_dir, "originals", value) as asset:
+            if asset is None or not 0 < fstat(asset.fileno()).st_size <= MAX_UPLOAD_BYTES:
+                return None
+            with Image.open(asset, formats=ALLOWED_RASTER_FORMATS) as original:
+                return _embedded_rgb_profile(original)
+    except (OSError, SyntaxError, ValueError, Image.DecompressionBombError, Image.DecompressionBombWarning):
+        return None
 
 
 def load_processed_photo(data_dir: Path, value: str | None) -> Image.Image | None:
@@ -212,6 +303,22 @@ def load_processed_photo(data_dir: Path, value: str | None) -> Image.Image | Non
         return _decode_photo(BytesIO(raw))
     except PhotoProcessingError:
         return None
+
+
+def load_color_managed_photo(
+    data_dir: Path, processed_path: str | None, original_path: str | None
+) -> Image.Image | None:
+    """Normalize a saved raster while retaining its existing framing."""
+    image = load_processed_photo(data_dir, processed_path)
+    if image is None:
+        return None
+    profile = None
+    if "srgb" not in image.info:
+        if "icc_profile" in image.info:
+            profile = _embedded_rgb_profile(image)
+        else:
+            profile = _original_rgb_profile(data_dir, original_path)
+    return _normalize_rgb(image, profile)
 
 
 def read_photo_asset(value: str | None, directory: str, *, limit: int = MAX_UPLOAD_BYTES) -> bytes | None:

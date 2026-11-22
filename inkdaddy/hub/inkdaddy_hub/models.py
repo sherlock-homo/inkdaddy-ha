@@ -184,6 +184,8 @@ class Playback(Base):
     anchor_position: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
     paused: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
     current_offer_id: Mapped[int | None] = mapped_column(Integer)
+    manual_request_hour: Mapped[int | None] = mapped_column(Integer)
+    manual_requested_at: Mapped[datetime | None] = mapped_column(DateTime)
 
 
 class PlaybackSlot(Base):
@@ -196,6 +198,7 @@ class PlaybackSlot(Base):
     title: Mapped[str] = mapped_column(String(255), nullable=False)
     frame_id: Mapped[str] = mapped_column(ForeignKey("frames.frame_id"), index=True, nullable=False)
     render_key: Mapped[str] = mapped_column(String(64), nullable=False)
+    manual_observed_at: Mapped[datetime | None] = mapped_column(DateTime)
 
 
 class PlaybackOffer(Base):

@@ -39,7 +39,7 @@ from .dashboard_content import (
     resolve_widget_text,
 )
 from .palette import PHOTO_DITHER_VERSION, WAVESHARE_7COLOR_6, raw_frame_from_image, raw_photo_frame
-from .photos import load_processed_photo
+from .photos import load_color_managed_photo, load_processed_photo
 from .rendering import build_frame_manifest
 
 UPCOMING_SLOTS = 5
@@ -51,6 +51,7 @@ _ASSET_SWEEP_KEY = "playback.asset_sweep_hour"
 _GENERATED_RAW_NAME = re.compile(r"[0-9a-f]{24}\.raw")
 _UNREADABLE_PHOTOS_LIMIT = 128
 _UNREADABLE_PHOTO_RETRY_SECONDS = 300
+_PHOTO_COLOR_VERSION = "icc-srgb-v1"
 _unreadable_photos: OrderedDict[tuple[object, ...], float] = OrderedDict()
 MATTER_FRAME_FAILED = "matter_frame_failed"
 
@@ -183,6 +184,7 @@ def update_playlist(
     playback.playlist_json = json.dumps([asdict(source) for source in sources])
     playback.anchor_hour = hour
     playback.anchor_position = 0
+    playback.manual_request_hour = playback.manual_requested_at = None
     _invalidate_slot(db, device, hour)
     db.flush()
 
@@ -196,12 +198,15 @@ def _position(playback: Playback, hour: int) -> int:
 def apply_playback_action(
     db: Session, device: Device, action: str, now: datetime | None = None
 ) -> None:
-    hour = _hour(now or _utc_now())
+    requested_at = now or _utc_now()
+    hour = _hour(requested_at)
     playback = _get_playback(db, device, hour)
     if action not in ACTION_NAMES:
         raise ValueError("Unsupported display action.")
     if action == "refresh_current":
-        _invalidate_slot(db, device, playback.anchor_hour if playback.paused else hour)
+        playback.manual_request_hour = playback.anchor_hour if playback.paused else hour
+        playback.manual_requested_at = requested_at.astimezone(timezone.utc).replace(tzinfo=None)
+        _invalidate_slot(db, device, playback.manual_request_hour)
         invalidate_matter_transfer(db, device.id)
         return
     if (action == "pause" and playback.paused) or (action == "play" and not playback.paused):
@@ -212,6 +217,8 @@ def apply_playback_action(
     if action in {"pause", "play"}:
         playback.paused = action == "pause"
     if offset:
+        playback.manual_request_hour = hour
+        playback.manual_requested_at = requested_at.astimezone(timezone.utc).replace(tzinfo=None)
         _invalidate_slot(db, device, hour)
 
 
@@ -220,6 +227,7 @@ def reset_selection(db: Session, device: Device, now: datetime | None = None) ->
     if playback and not _playlist(playback):
         playback.anchor_hour = _hour(now or _utc_now())
         playback.anchor_position = 0
+        playback.manual_request_hour = playback.manual_requested_at = None
         _invalidate_slot(db, device, playback.anchor_hour)
 
 
@@ -233,22 +241,32 @@ def invalidate_matter_transfer(db: Session, device_id: int) -> None:
     db.execute(delete(MatterFrameTransfer).where(MatterFrameTransfer.device_id == device_id))
 
 
+def _manual_request_at(playback: Playback | None, hour: int) -> datetime | None:
+    if playback and playback.manual_request_hour == hour and playback.manual_requested_at is not None:
+        return playback.manual_requested_at.replace(tzinfo=timezone.utc)
+    return None
+
+
 def refresh_playback_slots(
     db: Session, device: Device, *, now: datetime | None = None, upcoming: bool = True
 ) -> PlaybackSlot:
     """Prepare the due frame and up to five future frames. Call inside a write transaction."""
-    hour = _hour(now or _utc_now())
+    observed_at = now or _utc_now()
+    hour = _hour(observed_at)
     playback = _get_playback(db, device, hour)
     sources = _expand_playback(db, device, playback)
     position = _position(playback, hour)
     current_hour = playback.anchor_hour if playback.paused else hour
     current = db.get(PlaybackSlot, (device.id, current_hour))
     if not current or not _slot_already_offered(db, current):
-        current = _prepare_slot(db, device, current_hour, sources[position % len(sources)], observed_at=now)
+        current = _prepare_slot(
+            db, device, current_hour, sources[position % len(sources)],
+            observed_at=observed_at, manual_requested_at=_manual_request_at(playback, current_hour),
+        )
     if upcoming:
         for offset in range(1, UPCOMING_SLOTS + 1):
             next_hour = hour + offset
-            _prepare_slot(db, device, next_hour, sources[(position + offset) % len(sources)], observed_at=now)
+            _prepare_slot(db, device, next_hour, sources[(position + offset) % len(sources)], observed_at=observed_at)
         preserve_current = PlaybackSlot.hour != current_hour
         skipped_hour = PlaybackSlot.hour <= hour
         skipped_future = PlaybackSlot.hour > hour + UPCOMING_SLOTS
@@ -286,8 +304,12 @@ def repair_playback_frame(db: Session, device: Device, slot: PlaybackSlot, frame
         or Path(frame.path) != _generated_frame_path(frame.frame_id)
     ):
         raise ValueError("The frame is outside the generated playback cache.")
+    manual_requested_at = (
+        _manual_request_at(db.get(Playback, device.id), slot.hour) if slot.source_type == "dashboard" else None
+    )
     _prepare_slot(
-        db, device, slot.hour, Source(slot.source_type, slot.source_id), repair_frame=frame
+        db, device, slot.hour, Source(slot.source_type, slot.source_id),
+        repair_frame=frame, manual_requested_at=manual_requested_at,
     )
 
 
@@ -299,37 +321,46 @@ def _prepare_slot(
     *,
     repair_frame: Frame | None = None,
     observed_at: datetime | None = None,
+    manual_requested_at: datetime | None = None,
 ) -> PlaybackSlot:
     slot = db.get(PlaybackSlot, (device.id, hour))
     photo = _ready_photo(db, source.id) if source.type == "photo" else None
     data_dir = get_settings().data_dir
     photo_metadata = asset_stat(data_dir, "processed", photo.processed_path) if photo else None
-    use_photo_dither = False
     version: tuple[object, ...]
     if photo and photo_metadata:
         title = photo.original_filename
-        photo_version = (source.type, source.id, title, photo.checksum)
-        legacy_version = (*photo_version, photo_metadata.st_mtime_ns)
-        # Prefer the historical encoder when an older offer's key identifies it.
-        legacy_offer = (
-            repair_frame is not None and slot is not None and slot.render_key == _render_key(legacy_version)
+        original_metadata = asset_stat(data_dir, "originals", photo.original_path)
+        version = (
+            source.type, source.id, title, photo.checksum, _photo_asset_signature(photo_metadata),
+            PHOTO_DITHER_VERSION, _PHOTO_COLOR_VERSION,
+            _photo_asset_signature(original_metadata) if original_metadata else None,
         )
-        use_photo_dither = not legacy_offer
-        version = (*photo_version, _photo_asset_signature(photo_metadata), PHOTO_DITHER_VERSION)
     else:
         source = Source("dashboard", source.id if source.type == "dashboard" else "sample")
         dashboard = get_dashboard_record(db, source.id)
         config = dashboard_config(dashboard)
-        timestamp = _hour_time(hour)
-        widgets = resolve_widget_text(db, config, timestamp, device, observed_at=observed_at)
+        timestamp = manual_requested_at or _hour_time(hour)
+        if repair_frame is not None and slot is not None and slot.manual_observed_at is not None:
+            observed_at = slot.manual_observed_at.replace(tzinfo=timezone.utc)
+        observed_at = observed_at or _utc_now()
+        widgets = resolve_widget_text(
+            db, config, timestamp, device, observed_at=observed_at,
+            time_kind="manual" if manual_requested_at is not None else "scheduled",
+        )
         title = dashboard.name if dashboard else str(config.get("name", "Home Overview"))
         version = (source.type, source.id, title, config, [asdict(widget) for widget in widgets])
-        if repair_frame is not None and slot is not None and slot.render_key != _render_key(version):
-            legacy_widgets = resolve_widget_text(db, config, timestamp, device, legacy=True)
-            legacy_version = (*version[:-1], [asdict(widget) for widget in legacy_widgets])
-            if slot.render_key == _render_key(legacy_version):
-                widgets = legacy_widgets
-                version = legacy_version
+        if repair_frame is not None and slot is not None and manual_requested_at is None:
+            if slot.render_key != _render_key(version):
+                for render_version in ("previous", "legacy"):
+                    historical_widgets = resolve_widget_text(
+                        db, config, timestamp, device, observed_at=observed_at, render_version=render_version,
+                    )
+                    historical_version = (*version[:-1], [asdict(widget) for widget in historical_widgets])
+                    if slot.render_key == _render_key(historical_version):
+                        widgets = historical_widgets
+                        version = historical_version
+                        break
 
     render_key = _render_key(version)
     frame = None
@@ -362,20 +393,18 @@ def _prepare_slot(
                 if repair_frame is not None:
                     raise ValueError("Could not read the original processed photo.")
                 return _prepare_slot(
-                    db, device, hour, Source("dashboard", "sample"), observed_at=observed_at
+                    db, device, hour, Source("dashboard", "sample"),
+                    observed_at=observed_at, manual_requested_at=manual_requested_at,
                 )
             if image.size != (800, 480):
                 image = image.resize((800, 480), Image.Resampling.LANCZOS)
+            raw, checksum = raw_photo_frame(image)
+            if repair_frame is not None and checksum != repair_frame.sha256:
+                raw, checksum = _repair_previous_photo_bytes(data_dir, photo, repair_frame)
         else:
             image = render_dashboard(config, widgets)
-        if use_photo_dither:
-            raw, checksum = raw_photo_frame(image)
-        else:
             raw, checksum = raw_frame_from_image(image, dither=True)
         if repair_frame is not None:
-            if photo_metadata and use_photo_dither and checksum != repair_frame.sha256:
-                # A restored pre-dither photo may have different filesystem metadata.
-                raw, checksum = raw_frame_from_image(image, dither=True)
             if checksum != repair_frame.sha256 or checksum[:24] != repair_frame.frame_id:
                 raise ValueError("The regenerated frame does not match the original frame.")
             assert slot is not None
@@ -390,8 +419,23 @@ def _prepare_slot(
     slot.title = title
     slot.frame_id = frame.frame_id
     slot.render_key = render_key
+    slot.manual_observed_at = (
+        observed_at.astimezone(timezone.utc).replace(tzinfo=None)
+        if source.type == "dashboard" and manual_requested_at is not None else None
+    )
     db.flush()
     return slot
+
+
+def _repair_previous_photo_bytes(data_dir: Path, photo: Photo, frame: Frame) -> tuple[bytes, str]:
+    # Try older encodings only during repair. The caller still requires the offered full digest.
+    image = load_processed_photo(data_dir, photo.processed_path)
+    if image is None:
+        raise ValueError("Could not read the original processed photo.")
+    if image.size != (800, 480):
+        image = image.resize((800, 480), Image.Resampling.LANCZOS)
+    raw, checksum = raw_photo_frame(image)
+    return (raw, checksum) if checksum == frame.sha256 else raw_frame_from_image(image, dither=True)
 
 
 def _photo_frame_available(data_dir: Path, frame: Frame) -> bool:
@@ -416,7 +460,7 @@ def _load_scheduled_photo(data_dir: Path, photo: Photo, metadata: stat_result) -
     now = monotonic()
     if _unreadable_photos.get(signature, 0) > now:
         return None
-    image = load_processed_photo(data_dir, photo.processed_path)
+    image = load_color_managed_photo(data_dir, photo.processed_path, photo.original_path)
     if image is None:
         _unreadable_photos[signature] = now + _UNREADABLE_PHOTO_RETRY_SECONDS
         if len(_unreadable_photos) > _UNREADABLE_PHOTOS_LIMIT:

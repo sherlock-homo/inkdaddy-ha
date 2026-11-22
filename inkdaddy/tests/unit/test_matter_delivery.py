@@ -414,6 +414,7 @@ def test_terminal_failure_is_exact_and_survives_worker_restart(linked_display, d
         db.get(Device, device_id).battery_percent = 74
         db.commit()
     with TestClient(app) as client:
+        assert client.post(f"{device_url}/manual-refresh?action=refresh_current").status_code == 200
         attempt = deliver_frame(controller, device_id, node, None, now=0)
         controller.state = "displayed"
         assert deliver_frame(controller, device_id, node, attempt, now=5) is None

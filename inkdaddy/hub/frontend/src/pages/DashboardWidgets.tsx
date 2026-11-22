@@ -3,10 +3,10 @@ import { apiJson } from "../lib/api";
 import type { DashboardWidget, HAEntity } from "../lib/types";
 
 export const widgetKinds = {
-  clock: { name: "Clock", subtitle: "Local time and date at refresh", symbol: "◷" },
+  clock: { name: "Clock", subtitle: "Local time of a scheduled or requested refresh", symbol: "◷" },
   location: { name: "Location", subtitle: "Name and time zone of your home", symbol: "⌖" },
   weather: { name: "Weather", subtitle: "Current conditions from Home Assistant", symbol: "☁" },
-  device_battery: { name: "Display battery", subtitle: "Battery level of the display showing this", symbol: "▰" },
+  device_battery: { name: "Display battery", subtitle: "Last battery level reported by this display", symbol: "▰" },
   home_assistant: { name: "Home Assistant sensor", subtitle: "A recently reported measurement", symbol: "≋" },
   text: { name: "Text note", subtitle: "A message that stays put", symbol: "Aa" }
 } as const;
@@ -99,6 +99,11 @@ export function WidgetGallery({ disabled, onAdd }: { disabled: boolean; onAdd: (
 }
 
 type DashboardEntity = HAEntity & { area_name?: string | null; device_name?: string | null };
+const maxReportAgeMs = 60 * 60 * 1000;
+
+function reportExpiresAt(entity: DashboardEntity) {
+  return Date.parse(entity.source_reported_at ?? "") + maxReportAgeMs;
+}
 
 function EntityPicker({ weather, selected, disabled, onChange }: {
   weather: boolean; selected: string; disabled: boolean; onChange: (id: string) => void;
@@ -107,6 +112,10 @@ function EntityPicker({ weather, selected, disabled, onChange }: {
   const [entities, setEntities] = useState<DashboardEntity[]>([]);
   const [error, setError] = useState("");
   const [loading, setLoading] = useState(true);
+  const [asOf, setAsOf] = useState(() => Date.now());
+  const [cacheRefresh, setCacheRefresh] = useState(0);
+  const available = entities.filter((entity) => reportExpiresAt(entity) > asOf);
+  const expiresAt = Math.min(...available.map(reportExpiresAt));
 
   useEffect(() => {
     const controller = new AbortController();
@@ -117,6 +126,7 @@ function EntityPicker({ weather, selected, disabled, onChange }: {
       try {
         const result = await apiJson<{ entities: DashboardEntity[]; error?: string | null }>(`/api/home-assistant/entities?${parameters}`, { signal: controller.signal });
         if (controller.signal.aborted) return;
+        setAsOf(Date.now());
         setEntities(result.entities);
         setError(result.error ?? "");
       } catch (reason) {
@@ -129,10 +139,28 @@ function EntityPicker({ weather, selected, disabled, onChange }: {
       }
     }, 160);
     return () => { window.clearTimeout(timer); controller.abort(); };
-  }, [query, weather]);
+  }, [query, weather, cacheRefresh]);
+
+  useEffect(() => {
+    if (!Number.isFinite(expiresAt)) return;
+    const timer = window.setTimeout(() => {
+      setAsOf(Date.now());
+      setCacheRefresh((count) => count + 1);
+    }, Math.max(0, expiresAt - Date.now()));
+    return () => window.clearTimeout(timer);
+  }, [expiresAt]);
 
   const choose = (next: string) => {
     if (next !== query) { setLoading(true); setQuery(next); }
+  };
+  const select = (entity: DashboardEntity) => {
+    const now = Date.now();
+    if (reportExpiresAt(entity) > now) {
+      onChange(entity.entity_id);
+    } else {
+      setAsOf(now);
+      setCacheRefresh((count) => count + 1);
+    }
   };
   const current = entities.find((entity) => entity.entity_id === selected);
   return <div className="dd-entity-picker">
@@ -141,7 +169,7 @@ function EntityPicker({ weather, selected, disabled, onChange }: {
         onKeyDown={(event) => {
           if (event.key !== "Enter") return;
           event.preventDefault();
-          if (!loading && !error && entities.length === 1) onChange(entities[0].entity_id);
+          if (!loading && !error && available.length === 1) select(available[0]);
         }}
         onChange={(event) => choose(event.target.value)} />
     </label>
@@ -150,9 +178,9 @@ function EntityPicker({ weather, selected, disabled, onChange }: {
       {weather ? <button type="button" className="dd-inline-button" disabled={disabled || !selected} onClick={() => onChange("")}>Use automatic</button> :
         <button type="button" className="dd-inline-button" disabled={disabled} onClick={() => choose("battery")}>Find batteries</button>}
     </div>
-    {loading ? <p className="dd-hint" role="status">Searching…</p> : error ? <p className="warning-text" role="status">{error}</p> : entities.length ?
+    {loading ? <p className="dd-hint" role="status">Searching…</p> : error ? <p className="warning-text" role="status">{error}</p> : available.length ?
       <div className="dd-entity-results" aria-label="Matching entities">
-        {entities.map((entity) => <button type="button" key={entity.entity_id} aria-pressed={entity.entity_id === selected} disabled={disabled} onClick={() => onChange(entity.entity_id)}>
+        {available.map((entity) => <button type="button" key={entity.entity_id} aria-pressed={entity.entity_id === selected} disabled={disabled} onClick={() => select(entity)}>
           <span><strong>{entity.name || entity.entity_id}</strong><small>{[entity.area_name, entity.entity_id].filter(Boolean).join(" · ")}</small></span>
           {entity.state && <span className="dd-entity-state">{entity.state}</span>}
         </button>)}

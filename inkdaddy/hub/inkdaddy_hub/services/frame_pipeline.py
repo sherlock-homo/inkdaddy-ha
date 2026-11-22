@@ -14,7 +14,7 @@ from .asset_storage import asset_stat, write_asset
 from .dashboard_content import dashboard_config, get_dashboard_record, render_dashboard, resolve_widget_text
 from .matter_onboarding import default_matter_onboarding_codes
 from .palette import WAVESHARE_7COLOR_6, raw_frame_from_image
-from .photos import load_processed_photo
+from .photos import load_color_managed_photo
 from .provisioning import DisplayContentKind, ProvisioningState, next_display_content_kind
 from .rendering import FrameManifest, build_frame_manifest, render_matter_join_screen
 
@@ -76,7 +76,7 @@ def render_device_image(db: Session, device: Device, *, refresh_count: int) -> t
     elif device.selected_source_type == "album":
         photo = selected_album_photo(db, device)
     if photo:
-        image = load_processed_photo(get_settings().data_dir, photo.processed_path)
+        image = load_color_managed_photo(get_settings().data_dir, photo.processed_path, photo.original_path)
         if image is not None:
             return image, content_kind, f"photo-{photo.id}"
     dashboard = get_dashboard_record(db, device.selected_source_id) if device.selected_source_type == "dashboard" else None

@@ -132,6 +132,7 @@ export interface HAEntity {
   name: string | null;
   state: string | null;
   attributes: Record<string, unknown>;
+  source_reported_at?: string | null;
   updated_at: string | null;
 }
 

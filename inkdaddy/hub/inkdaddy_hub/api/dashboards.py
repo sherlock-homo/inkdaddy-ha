@@ -148,7 +148,7 @@ def _preview(db: Session, config: dict[str, Any], device_uid: str | None) -> Res
     device = (
         db.scalar(select(Device).where(Device.device_uid == device_uid)) if device_uid else None
     )
-    widgets = resolve_widget_text(db, config, datetime.now(timezone.utc), device)
+    widgets = resolve_widget_text(db, config, datetime.now(timezone.utc), device, time_kind="preview")
     return Response(
         content=render_preview_png_bytes(render_dashboard(config, widgets)), media_type="image/png"
     )

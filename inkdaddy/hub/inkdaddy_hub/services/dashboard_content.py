@@ -5,7 +5,7 @@ from copy import deepcopy
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from functools import lru_cache
-from typing import Any
+from typing import Any, Literal
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from PIL import Image, ImageDraw
@@ -18,6 +18,8 @@ from .dashboard_sensors import UNAVAILABLE_STATES, dashboard_eligible, entity_at
 from .rendering import _font
 
 SITE_SETTING = "home_assistant.site"
+DashboardTimeKind = Literal["scheduled", "manual", "preview"]
+DashboardRenderVersion = Literal["current", "previous", "legacy"]
 
 
 @dataclass(frozen=True)
@@ -47,7 +49,8 @@ def resolve_widget_text(
     device: Device | None,
     *,
     observed_at: datetime | None = None,
-    legacy: bool = False,
+    time_kind: DashboardTimeKind = "scheduled",
+    render_version: DashboardRenderVersion = "current",
 ) -> list[WidgetText]:
     site_setting = db.get(Setting, SITE_SETTING)
     site = json.loads(site_setting.value_json) if site_setting else {}
@@ -63,10 +66,17 @@ def resolve_widget_text(
         source_type = source.get("type")
         label = str(options.get("label") or widget.get("title") or "")
         if source_type == "clock":
-            detail = local.strftime("%A, %B %d") if legacy else local.strftime("For %a, %b %d")
-            widgets.append(
-                WidgetText(label or ("Local time" if legacy else "Time at refresh"), local.strftime("%H:%M"), detail)
-            )
+            if render_version == "legacy":
+                clock_label, detail = "Local time", local.strftime("%A, %B %d")
+            elif render_version == "previous":
+                clock_label, detail = "Time at refresh", local.strftime("For %a, %b %d")
+            elif time_kind == "manual":
+                clock_label, detail = "Refresh request", local.strftime("Requested %a, %b %d")
+            elif time_kind == "preview":
+                clock_label, detail = "Preview time", local.strftime("Preview %a, %b %d")
+            else:
+                clock_label, detail = "Scheduled time", local.strftime("For %a, %b %d")
+            widgets.append(WidgetText(label or clock_label, local.strftime("%H:%M"), detail))
         elif source_type == "location":
             zone = db.get(HAEntityCache, "zone.home")
             widgets.append(
@@ -82,10 +92,11 @@ def resolve_widget_text(
                 WidgetText(
                     label or "Display battery",
                     f"{sample:.0f}%" if sample is not None else "Unavailable",
+                    "Last reported" if sample is not None and render_version == "current" else "",
                 )
             )
         elif source.get("entity_id") or source_type == "weather":
-            widgets.append(_entity_widget_text(db, widget, label, observed_at, legacy=legacy))
+            widgets.append(_entity_widget_text(db, widget, label, observed_at, legacy=render_version == "legacy"))
         else:
             widgets.append(WidgetText(label, str(options.get("text", "Unavailable"))))
     return widgets
