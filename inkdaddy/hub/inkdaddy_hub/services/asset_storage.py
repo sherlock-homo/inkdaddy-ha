@@ -10,6 +10,32 @@ from uuid import uuid4
 
 
 @contextmanager
+def _asset_directory(
+    root: Path, parts: tuple[str, ...], *, create_parents: bool = False
+) -> Iterator[int | None]:
+    # Keep directory descriptors pinned through the operation and reject symlinks.
+    flags = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW
+    with ExitStack() as stack:
+        try:
+            if create_parents:
+                root.mkdir(parents=True, exist_ok=True)
+            parent = os.open(root, flags)
+            stack.callback(os.close, parent)
+            for part in parts:
+                if create_parents:
+                    try:
+                        os.mkdir(part, mode=0o700, dir_fd=parent)
+                    except FileExistsError:
+                        pass
+                parent = os.open(part, flags, dir_fd=parent)
+                stack.callback(os.close, parent)
+        except OSError:
+            yield None
+        else:
+            yield parent
+
+
+@contextmanager
 def _asset_entry(
     data_dir: Path, directory: str, value: str | Path | None, *, create_parents: bool = False
 ) -> Iterator[tuple[int, str] | None]:
@@ -22,26 +48,15 @@ def _asset_entry(
         yield None
         return
 
-    # Keep directory descriptors pinned through the operation and reject symlinks.
-    flags = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW
-    with ExitStack() as stack:
-        try:
-            if create_parents:
-                root.mkdir(parents=True, exist_ok=True)
-            parent = os.open(root, flags)
-            stack.callback(os.close, parent)
-            for part in (directory, *parts[:-1]):
-                if create_parents:
-                    try:
-                        os.mkdir(part, mode=0o700, dir_fd=parent)
-                    except FileExistsError:
-                        pass
-                parent = os.open(part, flags, dir_fd=parent)
-                stack.callback(os.close, parent)
-        except OSError:
-            yield None
-        else:
-            yield parent, parts[-1]
+    with _asset_directory(root, (directory, *parts[:-1]), create_parents=create_parents) as parent:
+        yield (parent, parts[-1]) if parent is not None else None
+
+
+def asset_names(data_dir: Path, directory: str, child: str) -> list[str]:
+    if child in ("", ".", "..") or Path(child).name != child:
+        return []
+    with _asset_directory(data_dir.absolute(), (directory, child)) as parent:
+        return os.listdir(parent) if parent is not None else []
 
 
 @contextmanager

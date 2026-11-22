@@ -9,6 +9,7 @@ import urllib.request
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from hashlib import sha256
+from threading import RLock
 from typing import TYPE_CHECKING, Any
 from urllib.parse import urlsplit
 
@@ -19,6 +20,7 @@ if TYPE_CHECKING:
 
 SUPERVISOR_CORE_URL = "http://supervisor/core"
 HA_CONFIG_ID = 1
+MANUAL_CONFIG_LOCK = RLock()
 ENTITY_CACHE_ATTRIBUTES = {"device_class", "state_class", "unit_of_measurement", "temperature", "temperature_unit"}
 ENTITY_CACHE_DOMAINS = ("sensor", "weather", "binary_sensor")
 _WEATHER_STATES = {
@@ -48,11 +50,12 @@ def get_connection(db: Session) -> HAConnection | None:
     from ..models import HomeAssistantConfig
     from .secrets import get_secret
 
-    config = db.get(HomeAssistantConfig, HA_CONFIG_ID)
-    if not config or not config.enabled:
-        return None
-    token = get_secret(config.token_secret_ref)
-    return HAConnection(config.base_url, token) if token else None
+    with MANUAL_CONFIG_LOCK:
+        config = db.get(HomeAssistantConfig, HA_CONFIG_ID, populate_existing=True)
+        if not config or not config.enabled:
+            return None
+        token = get_secret(config.token_secret_ref)
+        return HAConnection(config.base_url, token) if token else None
 
 
 @dataclass(frozen=True)

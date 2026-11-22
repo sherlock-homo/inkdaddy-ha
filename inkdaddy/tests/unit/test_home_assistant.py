@@ -1,12 +1,17 @@
+import json
+import stat
 import unittest
+from types import SimpleNamespace
 from unittest.mock import Mock
 
 import pytest
 from fastapi import HTTPException
 from sqlalchemy import create_engine
+from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.orm import Session
 
 from inkdaddy_hub.api import home_assistant as api
+from inkdaddy_hub.api.integrations import list_integrations
 from inkdaddy_hub.database import Base
 from inkdaddy_hub.models import HomeAssistantConfig
 from inkdaddy_hub.services import home_assistant as service, secrets
@@ -37,19 +42,13 @@ class HomeAssistantTests(unittest.TestCase):
 
 
 @pytest.fixture
-def manual_connection(monkeypatch):
+def manual_connection(monkeypatch, tmp_path):
     engine = create_engine("sqlite://")
     Base.metadata.create_all(engine)
-    stored = {api.HA_TOKEN_REF: "existing-demo-token"}
+    store_path = tmp_path / "secrets.json"
     monkeypatch.delenv("INKDADDY_HA_MODE", raising=False)
-    monkeypatch.setattr(api, "get_secret", stored.get)
-    monkeypatch.setattr(secrets, "get_secret", stored.get)
-
-    def save_secret(ref, value):
-        stored[ref] = value
-        return ref
-
-    monkeypatch.setattr(api, "set_secret", save_secret)
+    monkeypatch.setattr(secrets, "get_settings", lambda: SimpleNamespace(secrets_path=store_path))
+    secrets.set_secret(api.HA_TOKEN_REF, "existing-demo-token")
     try:
         with Session(engine) as db:
             db.add(HomeAssistantConfig(
@@ -57,7 +56,7 @@ def manual_connection(monkeypatch):
                 token_secret_ref=api.HA_TOKEN_REF, enabled=True,
             ))
             db.commit()
-            yield db, stored
+            yield db, store_path
     finally:
         engine.dispose()
 
@@ -104,8 +103,10 @@ def test_manual_ha_test_uses_credential_for_configured_origin_only(manual_connec
     validate.assert_called_once_with("https://HA.example.test:443", "existing-demo-token")
 
 
-def test_manual_ha_change_requires_new_credential_and_keeps_old_origin_separate(manual_connection, monkeypatch):
-    db, stored = manual_connection
+def test_manual_ha_origin_change_requires_new_credential_and_prunes_old_references(manual_connection, monkeypatch):
+    db, store_path = manual_connection
+    secrets.set_secret(f"{api.HA_TOKEN_REF}.obsolete", "old-demo-token")
+    secrets.set_secret("other.test_config", "unrelated-demo-value")
     validate = Mock(return_value={"ok": True})
     monkeypatch.setattr(api, "validate_home_assistant_token", validate)
     new_base = "https://second-ha.example.test"
@@ -119,7 +120,11 @@ def test_manual_ha_change_requires_new_credential_and_keeps_old_origin_separate(
     validate.assert_called_once_with(new_base, "new-demo-token")
     assert result["configured"] is True
     assert service.get_connection(db) == service.HAConnection(new_base, "new-demo-token")
-    assert stored[api.HA_TOKEN_REF] == "existing-demo-token"
+    active_ref = db.get(HomeAssistantConfig, api.HA_CONFIG_ID).token_secret_ref
+    assert json.loads(store_path.read_text()) == {
+        active_ref: "new-demo-token", "other.test_config": "unrelated-demo-value",
+    }
+    assert store_path.stat().st_mode & 0o777 == 0o600
     assert api.save_config({"enabled": False}, db)["base_url"] == new_base
 
 
@@ -130,6 +135,65 @@ def test_manual_ha_initial_config_does_not_adopt_an_orphaned_token(manual_connec
     result = api.save_config({"base_url": "https://new-ha.example.test"}, db)
     assert result["configured"] is False
     assert service.get_connection(db) is None
+
+
+def test_same_origin_rotation_and_failed_save_preserve_the_correct_token(manual_connection, monkeypatch):
+    db, store_path = manual_connection
+    before = db.get(HomeAssistantConfig, api.HA_CONFIG_ID)
+    with monkeypatch.context() as failure:
+        failure.setattr(db, "commit", Mock(side_effect=SQLAlchemyError("synthetic failed commit")))
+        with pytest.raises(SQLAlchemyError):
+            api.save_config({"token": "discarded-demo-token", "validate": False}, db)
+    assert before.token_secret_ref == api.HA_TOKEN_REF
+    assert json.loads(store_path.read_text()) == {api.HA_TOKEN_REF: "existing-demo-token"}
+
+    api.save_config({"token": "rotated-demo-token", "validate": False}, db)
+    config = db.get(HomeAssistantConfig, api.HA_CONFIG_ID)
+    assert config.last_validated_at is None
+    assert json.loads(store_path.read_text()) == {config.token_secret_ref: "rotated-demo-token"}
+
+
+@pytest.mark.skipif(secrets.os.name != "posix", reason="POSIX directory synchronization")
+def test_failed_secret_directory_sync_keeps_only_the_current_credential(manual_connection, monkeypatch):
+    db, store_path = manual_connection
+    real_fsync = secrets.os.fsync
+    failed = False
+
+    def fail_once(fd):
+        nonlocal failed
+        if not failed and stat.S_ISDIR(secrets.os.fstat(fd).st_mode):
+            failed = True
+            raise OSError("synthetic directory synchronization failure")
+        return real_fsync(fd)
+
+    monkeypatch.setattr(secrets.os, "fsync", fail_once)
+    with pytest.raises(OSError, match="synthetic directory synchronization"):
+        api.save_config({"token": "discarded-demo-token", "validate": False}, db)
+    assert service.get_connection(db).token == "existing-demo-token"
+    assert json.loads(store_path.read_text()) == {api.HA_TOKEN_REF: "existing-demo-token"}
+
+
+def test_trial_credentials_do_not_mark_the_saved_token_as_validated(manual_connection, monkeypatch):
+    db, _ = manual_connection
+    monkeypatch.setattr(api, "validate_home_assistant_token", Mock(return_value={"ok": True}))
+    assert api.test_config({"token": "trial-demo-token"}, db) == {"ok": True}
+    assert db.get(HomeAssistantConfig, api.HA_CONFIG_ID).last_validated_at is None
+    assert api.test_config({}, db) == {"ok": True}
+    assert db.get(HomeAssistantConfig, api.HA_CONFIG_ID).last_validated_at is not None
+
+
+def test_existing_session_reads_the_active_credential_after_rotation(manual_connection):
+    writer, _ = manual_connection
+    with Session(writer.bind, expire_on_commit=False) as reader:
+        old_config = reader.get(HomeAssistantConfig, api.HA_CONFIG_ID)
+        assert old_config.token_secret_ref == api.HA_TOKEN_REF
+        api.save_config({"token": "rotated-demo-token", "validate": False}, writer)
+        assert list_integrations(reader)["integrations"][0]["configured"] is True
+        reader.expire(old_config)
+        assert service.get_connection(reader) == service.HAConnection(
+            "https://ha.example.test", "rotated-demo-token",
+        )
+        assert api.get_config(reader)["configured"] is True
 
 
 def test_managed_ha_uses_only_supervisor_origin_and_credential(manual_connection, monkeypatch):

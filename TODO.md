@@ -38,6 +38,12 @@
 - An idle hub benchmark eliminated 48 MB of application-level frame reads per 250 checks. Median run time fell from 290 ms to 256 ms. The picker browsed 5,000 cached rows in 3.94 ms median and made zero Home Assistant requests. See the hardware acceptance items for LiPo and Thread measurements.
 - Gitleaks found no secrets in the staged tree, reachable history or built application files. Bandit reported no medium or high findings. The Python and npm lock audits returned zero known vulnerabilities, and the npm registry signature checks passed. The app verifies Supervisor 2026.11.0 or later before enabling Ingress and the Matter controller.
 
+### Cache and credential follow-up
+
+- A 48-hour playback simulation preserved five upcoming slots and the exact pending frame across restart. With two unchanged photo sources, the hub converted each photo once, down from 21 conversions, and retained at most seven raw assets (1.344 MB). A separate 12-hour run with a damaged photo preserved the queue and left no orphan files. Playback previews and managed Matter transfers verify the stored frame digest.
+- The packaged follow-up passed 143 Python tests, including four authenticated Matter transfers, and six controller tests. The same package passed the desktop and mobile browser workflows and the built application scan.
+- Standalone Home Assistant token replacement preserves the current token across failed writes and removes superseded tokens after a successful commit. The managed connection uses Supervisor credentials and bypasses the standalone store.
+
 ## First public app release
 
 - [x] Export an allowlist of app source and synthetic tests into a fresh Git repository. Exclude runtime data, hardware artifacts, and project history.

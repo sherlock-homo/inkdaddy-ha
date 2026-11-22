@@ -2,14 +2,18 @@ from __future__ import annotations
 
 import hashlib
 import json
+import re
 import sqlite3
+from collections import OrderedDict
 from dataclasses import asdict, dataclass
 from datetime import datetime, timedelta, timezone
+from os import stat_result
 from pathlib import Path
+from time import monotonic
 from urllib.parse import quote
 
 from PIL import Image
-from sqlalchemy import delete, select, text
+from sqlalchemy import delete, select, text, union
 from sqlalchemy.orm import Session
 
 from ..config import get_settings
@@ -25,8 +29,9 @@ from ..models import (
     Playback,
     PlaybackOffer,
     PlaybackSlot,
+    Setting,
 )
-from .asset_storage import asset_stat, read_asset, remove_asset, write_asset
+from .asset_storage import asset_names, asset_stat, read_asset, remove_asset, write_asset
 from .dashboard_content import (
     dashboard_config,
     get_dashboard_record,
@@ -42,6 +47,11 @@ MAX_RAW_FRAME_BYTES = 800 * 480 // 2
 ACTION_NAMES = {"next_content", "previous_content", "refresh_current", "pause", "play"}
 SUCCESS_RESULTS = {"displayed_hub_frame", "ok", "refresh:ok"}
 OFFER_RETENTION = timedelta(hours=1)
+_ASSET_SWEEP_KEY = "playback.asset_sweep_hour"
+_GENERATED_RAW_NAME = re.compile(r"[0-9a-f]{24}\.raw")
+_UNREADABLE_PHOTOS_LIMIT = 128
+_UNREADABLE_PHOTO_RETRY_SECONDS = 300
+_unreadable_photos: OrderedDict[tuple[object, ...], float] = OrderedDict()
 MATTER_FRAME_FAILED = "matter_frame_failed"
 
 
@@ -298,14 +308,14 @@ def _prepare_slot(
     version: tuple[object, ...]
     if photo and photo_metadata:
         title = photo.original_filename
-        version = (source.type, source.id, title, photo.checksum, photo_metadata.st_mtime_ns)
-        # An existing offer can only be repaired from the algorithm that created it.
+        photo_version = (source.type, source.id, title, photo.checksum)
+        legacy_version = (*photo_version, photo_metadata.st_mtime_ns)
+        # Prefer the historical encoder when an older offer's key identifies it.
         legacy_offer = (
-            repair_frame is not None and slot is not None and slot.render_key == _render_key(version)
+            repair_frame is not None and slot is not None and slot.render_key == _render_key(legacy_version)
         )
         use_photo_dither = not legacy_offer
-        if use_photo_dither:
-            version = (*version, PHOTO_DITHER_VERSION)
+        version = (*photo_version, _photo_asset_signature(photo_metadata), PHOTO_DITHER_VERSION)
     else:
         source = Source("dashboard", source.id if source.type == "dashboard" else "sample")
         dashboard = get_dashboard_record(db, source.id)
@@ -322,32 +332,56 @@ def _prepare_slot(
                 version = legacy_version
 
     render_key = _render_key(version)
+    frame = None
     if repair_frame is not None:
-        if slot is None or slot.render_key != render_key:
+        if slot is None or (not photo_metadata and slot.render_key != render_key):
             raise ValueError("The original frame can no longer be regenerated from its source.")
-    elif slot and slot.render_key == render_key:
-        frame = db.scalar(select(Frame).where(Frame.frame_id == slot.frame_id))
-        if frame and asset_stat(data_dir, "frames", frame.path):
+    else:
+        if slot and slot.render_key == render_key:
+            existing = db.scalar(select(Frame).where(Frame.frame_id == slot.frame_id))
+            if existing and (
+                _photo_frame_available(data_dir, existing) if photo_metadata
+                else asset_stat(data_dir, "frames", existing.path)
+            ):
+                return slot
+        if photo_metadata:
+            previous = db.scalar(
+                select(Frame).join(PlaybackSlot, PlaybackSlot.frame_id == Frame.frame_id)
+                .where(
+                    PlaybackSlot.device_id == device.id,
+                    PlaybackSlot.render_key == render_key,
+                )
+                .limit(1)
+            )
+            if previous and _photo_frame_available(data_dir, previous):
+                frame = previous
+    if frame is None:
+        if photo and photo_metadata:
+            image = _load_scheduled_photo(data_dir, photo, photo_metadata)
+            if image is None:
+                if repair_frame is not None:
+                    raise ValueError("Could not read the original processed photo.")
+                return _prepare_slot(
+                    db, device, hour, Source("dashboard", "sample"), observed_at=observed_at
+                )
+            if image.size != (800, 480):
+                image = image.resize((800, 480), Image.Resampling.LANCZOS)
+        else:
+            image = render_dashboard(config, widgets)
+        if use_photo_dither:
+            raw, checksum = raw_photo_frame(image)
+        else:
+            raw, checksum = raw_frame_from_image(image, dither=True)
+        if repair_frame is not None:
+            if photo_metadata and use_photo_dither and checksum != repair_frame.sha256:
+                # A restored pre-dither photo may have different filesystem metadata.
+                raw, checksum = raw_frame_from_image(image, dither=True)
+            if checksum != repair_frame.sha256 or checksum[:24] != repair_frame.frame_id:
+                raise ValueError("The regenerated frame does not match the original frame.")
+            assert slot is not None
+            _store_frame(db, raw, image, source)
             return slot
-    if photo and photo_metadata:
-        image = load_processed_photo(data_dir, photo.processed_path)
-        if image is None:
-            raise ValueError("Could not read the selected processed photo.")
-        if image.size != (800, 480):
-            image = image.resize((800, 480), Image.Resampling.LANCZOS)
-    else:
-        image = render_dashboard(config, widgets)
-    if use_photo_dither:
-        raw, checksum = raw_photo_frame(image)
-    else:
-        raw, checksum = raw_frame_from_image(image, dither=True)
-    if repair_frame is not None:
-        if checksum != repair_frame.sha256 or checksum[:24] != repair_frame.frame_id:
-            raise ValueError("The regenerated frame does not match the original frame.")
-        assert slot is not None
-        _store_frame(db, raw, image, source)
-        return slot
-    frame = _store_frame(db, raw, image, source)
+        frame = _store_frame(db, raw, image, source)
     if not slot:
         slot = PlaybackSlot(device_id=device.id, hour=hour)
         db.add(slot)
@@ -358,6 +392,38 @@ def _prepare_slot(
     slot.render_key = render_key
     db.flush()
     return slot
+
+
+def _photo_frame_available(data_dir: Path, frame: Frame) -> bool:
+    if (
+        frame.source_type != "playback"
+        or Path(frame.path) != _generated_frame_path(frame.frame_id)
+        or frame.size_bytes != MAX_RAW_FRAME_BYTES
+        or (frame.width, frame.height) != (800, 480)
+    ):
+        return False
+    metadata = asset_stat(data_dir, "frames", frame.path)
+    return metadata is not None and metadata.st_size == MAX_RAW_FRAME_BYTES
+
+
+def _photo_asset_signature(metadata: stat_result) -> tuple[int, int, int, int, int]:
+    return metadata.st_dev, metadata.st_ino, metadata.st_size, metadata.st_mtime_ns, metadata.st_ctime_ns
+
+
+def _load_scheduled_photo(data_dir: Path, photo: Photo, metadata: stat_result) -> Image.Image | None:
+    # Several slots can share the same source, so retry only after it changes or the timer expires.
+    signature = (data_dir, photo.processed_path, *_photo_asset_signature(metadata))
+    now = monotonic()
+    if _unreadable_photos.get(signature, 0) > now:
+        return None
+    image = load_processed_photo(data_dir, photo.processed_path)
+    if image is None:
+        _unreadable_photos[signature] = now + _UNREADABLE_PHOTO_RETRY_SECONDS
+        if len(_unreadable_photos) > _UNREADABLE_PHOTOS_LIMIT:
+            _unreadable_photos.popitem(last=False)
+    else:
+        _unreadable_photos.pop(signature, None)
+    return image
 
 
 def _render_key(version: tuple[object, ...]) -> str:
@@ -575,7 +641,10 @@ def read_frame_bytes(frame: Frame) -> bytes | None:
 def preview_image(frame: Frame) -> Image.Image:
     raw = read_frame_bytes(frame)
     pixels = frame.width * frame.height
-    if raw is None or frame.width <= 0 or frame.height <= 0 or (pixels + 1) // 2 != len(raw):
+    if (
+        raw is None or frame.width <= 0 or frame.height <= 0 or (pixels + 1) // 2 != len(raw)
+        or hashlib.sha256(raw).hexdigest() != frame.sha256
+    ):
         raise ValueError("Prepared frame is missing or invalid.")
     palette = WAVESHARE_7COLOR_6
     indices = bytes(value for byte in raw for value in (byte >> 4, byte & 15))[
@@ -590,7 +659,9 @@ def preview_image(frame: Frame) -> Image.Image:
 
 
 def prune_playback(db: Session, now: datetime | None = None) -> None:
-    expired = (now or _utc_now()).replace(tzinfo=None) - OFFER_RETENTION
+    begin_playback_write(db)
+    now = now or _utc_now()
+    expired = now.replace(tzinfo=None) - OFFER_RETENTION
     db.execute(
         delete(PlaybackOffer).where(
             PlaybackOffer.offered_at < expired,
@@ -610,9 +681,36 @@ def prune_playback(db: Session, now: datetime | None = None) -> None:
             ),
         )
     ).all()
-    cache_dir = get_settings().data_dir / "frames" / "playback"
+    data_dir = get_settings().data_dir
+    cache_dir = data_dir / "frames" / "playback"
     for frame in orphans:
         cache_path = cache_dir / f"{frame.frame_id}.raw"
         if Path(frame.path) == cache_path:
-            remove_asset(get_settings().data_dir, "frames", cache_path)
+            remove_asset(data_dir, "frames", cache_path)
         db.delete(frame)
+
+    _sweep_untracked_assets(db, data_dir, cache_dir, _hour(now))
+
+
+def _sweep_untracked_assets(db: Session, data_dir: Path, cache_dir: Path, hour: int) -> None:
+    last_sweep = db.get(Setting, _ASSET_SWEEP_KEY)
+    if last_sweep and last_sweep.value_json == str(hour):
+        return
+    # A rollback can leave the cache file behind without a committed Frame row.
+    # The caller holds the same writer lock used when generating playback assets.
+    names = asset_names(data_dir, "frames", "playback")
+    if names:
+        referenced = set(db.scalars(union(
+            select(Frame.frame_id),
+            select(PlaybackSlot.frame_id),
+            select(PlaybackOffer.frame_id),
+            select(Device.last_frame_id).where(Device.last_frame_id.is_not(None)),
+        )))
+        for name in names:
+            if _GENERATED_RAW_NAME.fullmatch(name) and name[:-4] not in referenced:
+                remove_asset(data_dir, "frames", cache_dir / name)
+    if last_sweep:
+        last_sweep.value_json = str(hour)
+    else:
+        db.add(Setting(key=_ASSET_SWEEP_KEY, value_json=str(hour)))
+    db.flush()

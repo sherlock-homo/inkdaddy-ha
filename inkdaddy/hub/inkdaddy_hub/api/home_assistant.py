@@ -1,13 +1,13 @@
 from __future__ import annotations
 
-import json
+import logging
 from datetime import datetime, timezone
-from hashlib import sha256
 from itertools import islice
 from typing import Literal
+from uuid import uuid4
 
 from fastapi import APIRouter, Depends, HTTPException, Query
-from sqlalchemy import func, select
+from sqlalchemy import func, select, update
 from sqlalchemy.orm import Session
 
 from ..database import get_db
@@ -16,6 +16,7 @@ from ..services.dashboard_sensors import DASHBOARD_DOMAINS, dashboard_eligible, 
 from ..services.home_assistant import (
     HA_CONFIG_ID,
     ENTITY_CACHE_DOMAINS,
+    MANUAL_CONFIG_LOCK,
     cache_entity_attributes,
     cache_entity_state,
     fetch_site,
@@ -28,16 +29,17 @@ from ..services.home_assistant import (
     supervisor_connection,
     validate_home_assistant_token,
 )
-from ..services.secrets import get_secret, secret_preview, set_secret
+from ..services.secrets import delete_secret, get_secret, retain_secret, secret_preview, set_secret
 
 router = APIRouter(prefix="/api/home-assistant", tags=["home-assistant"])
 
 HA_TOKEN_REF = "home_assistant.long_lived_access_token"
 DEFAULT_BASE_URL = "http://homeassistant.local:8123"
+LOGGER = logging.getLogger(__name__)
 
 
 def _get_config(db: Session) -> HomeAssistantConfig | None:
-    return db.get(HomeAssistantConfig, HA_CONFIG_ID)
+    return db.get(HomeAssistantConfig, HA_CONFIG_ID, populate_existing=True)
 
 
 def _manual_endpoint(
@@ -64,34 +66,34 @@ def _saved_token(config: HomeAssistantConfig | None, origin: tuple[str, str, int
 
 def _config_payload(db: Session, config: HomeAssistantConfig | None) -> dict[str, object]:
     managed = supervisor_connection()
-    base_url = config.base_url if config else DEFAULT_BASE_URL
     entity_count = db.scalar(select(func.count()).select_from(HAEntityCache)) or 0
-    connection = get_connection(db)
     site = {"location_name": None, "time_zone": None}
-    if connection and managed is not None:
-        try:
-            site = fetch_site(connection)
-        except (OSError, ValueError):
-            pass
     if managed is not None:
+        if managed.token:
+            try:
+                site = fetch_site(managed)
+            except (OSError, ValueError):
+                pass
         return {
             "mode": managed.mode,
             "base_url": None,
-            "configured": bool(connection),
-            "enabled": bool(connection),
+            "configured": bool(managed.token),
+            "enabled": bool(managed.token),
             "last_validated_at": None,
             "token_preview": None,
             "token_page_url": None,
             "entity_count": entity_count,
             **site,
         }
+    base_url = config.base_url if config else DEFAULT_BASE_URL
+    preview = secret_preview(config.token_secret_ref) if config else None
     return {
         "mode": "manual",
         "base_url": base_url,
-        "configured": bool(config and get_secret(config.token_secret_ref)),
+        "configured": bool(preview),
         "enabled": bool(config.enabled) if config else False,
         "last_validated_at": config.last_validated_at.isoformat() if config and config.last_validated_at else None,
-        "token_preview": secret_preview(config.token_secret_ref) if config else None,
+        "token_preview": preview,
         "token_page_url": profile_token_url(base_url),
         "entity_count": entity_count,
         **site,
@@ -116,13 +118,23 @@ def _entity_payload(entity: HAEntityCache) -> dict[str, object]:
 
 @router.get("/config")
 def get_config(db: Session = Depends(get_db)) -> dict[str, object]:
-    return _config_payload(db, _get_config(db))
+    if supervisor_connection() is not None:
+        return _config_payload(db, None)
+    with MANUAL_CONFIG_LOCK:
+        return _config_payload(db, _get_config(db))
 
 
 @router.put("/config")
 def save_config(payload: dict[str, object], db: Session = Depends(get_db)) -> dict[str, object]:
     if supervisor_connection() is not None:
         raise HTTPException(status_code=409, detail="Home Assistant Supervisor manages this connection.")
+    # The hub serves a single app process. Serialize standalone configuration saves
+    # across its request threads until the corresponding secret cleanup finishes.
+    with MANUAL_CONFIG_LOCK:
+        return _save_manual_config(db, payload)
+
+
+def _save_manual_config(db: Session, payload: dict[str, object]) -> dict[str, object]:
     config = _get_config(db)
     base_url, origin = _manual_endpoint(payload, config)
     token = str(payload.get("token") or "")
@@ -147,14 +159,26 @@ def save_config(payload: dict[str, object], db: Session = Depends(get_db)) -> di
     else:
         config.base_url = base_url
         config.enabled = enabled
-    if token:
-        # Never overwrite another origin's credential while its settings row
-        # is still visible to other requests or if this transaction fails.
-        origin_digest = sha256(json.dumps(origin).encode("utf-8")).hexdigest()
-        config.token_secret_ref = set_secret(f"{HA_TOKEN_REF}.{origin_digest}", token)
-        config.last_validated_at = datetime.utcnow() if validate else config.last_validated_at
-    db.commit()
+    replacement = f"{HA_TOKEN_REF}.{uuid4().hex}" if token else None
+    try:
+        if replacement:
+            # Keep the current credential usable until the settings commit succeeds.
+            set_secret(replacement, token)
+            config.token_secret_ref = replacement
+            config.last_validated_at = datetime.now(timezone.utc).replace(tzinfo=None) if validate else None
+        db.commit()
+    except Exception:
+        db.rollback()
+        try:
+            delete_secret(replacement)
+        except OSError:
+            LOGGER.warning("Could not remove the uncommitted Home Assistant credential from the private store.")
+        raise
     db.refresh(config)
+    try:
+        retain_secret(HA_TOKEN_REF, config.token_secret_ref)
+    except OSError:
+        LOGGER.warning("Could not remove superseded Home Assistant credentials from the private store.")
     return _config_payload(db, config)
 
 
@@ -165,16 +189,28 @@ def test_config(payload: dict[str, object], db: Session = Depends(get_db)) -> di
         if not managed.token:
             return {"ok": False, "detail": "Home Assistant Supervisor did not supply an app token."}
         return validate_home_assistant_token(managed.base_url, managed.token)
-    config = _get_config(db)
-    base_url, origin = _manual_endpoint(payload, config)
-    token = str(payload.get("token") or "")
-    if not token:
-        token = _saved_token(config, origin) or ""
+    supplied_token = str(payload.get("token") or "")
+    with MANUAL_CONFIG_LOCK:
+        config = _get_config(db)
+        base_url, origin = _manual_endpoint(payload, config)
+        token = supplied_token or _saved_token(config, origin)
+        validated_ref = (
+            config.token_secret_ref
+            if not supplied_token and config and config.base_url == base_url else None
+        )
     if not token:
         return {"ok": False, "detail": "Paste a Home Assistant long-lived access token."}
     result = validate_home_assistant_token(base_url, token)
-    if result.get("ok") and config:
-        config.last_validated_at = datetime.utcnow()
+    if result.get("ok") and validated_ref:
+        db.execute(
+            update(HomeAssistantConfig)
+            .where(
+                HomeAssistantConfig.id == HA_CONFIG_ID,
+                HomeAssistantConfig.base_url == base_url,
+                HomeAssistantConfig.token_secret_ref == validated_ref,
+            )
+            .values(last_validated_at=datetime.now(timezone.utc).replace(tzinfo=None))
+        )
         db.commit()
     return result
 

@@ -23,7 +23,7 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
     INKDADDY_DEFAULT_REFRESH_MINUTES=60 \
     INKDADDY_UDP_HEARTBEAT_ENABLED=0 \
     INKDADDY_UDP_FRAME_TRANSFER_ENABLED=0 \
-    INKDADDY_VERSION=0.2.0-dev.17
+    INKDADDY_VERSION=0.2.0-dev.18
 # These are fixed, signed Debian snapshots. Allow their historical metadata to age.
 RUN sed -i \
         -e 's|^URIs: http://deb.debian.org/debian$|URIs: https://snapshot.debian.org/archive/debian/20261120T000000Z/|' \

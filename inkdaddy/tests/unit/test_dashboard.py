@@ -8,9 +8,17 @@ from inkdaddy_hub.services.dashboard import (
     load_dashboard_yaml,
     validate_dashboard_config,
 )
+from inkdaddy_hub.services.dashboard_content import dashboard_config
 
 
 class DashboardValidationTests(unittest.TestCase):
+    def test_cached_dashboard_returns_an_independent_config(self):
+        expected = dashboard_config(None)
+        edited = dashboard_config(None)
+        edited["widgets"][0]["source"]["type"] = "text"
+        self.assertEqual(dashboard_config(None), expected)
+        self.assertNotEqual(edited, expected)
+
     def test_yaml_requires_bounded_json_compatible_metadata(self):
         with self.assertRaisesRegex(DashboardValidationError, "64 KiB"):
             load_dashboard_yaml("name: " + "a" * MAX_YAML_BYTES)

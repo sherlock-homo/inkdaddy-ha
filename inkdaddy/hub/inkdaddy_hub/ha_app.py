@@ -117,7 +117,7 @@ def _supervisor_info(token: str, path: str) -> dict[str, Any]:
 
 
 def require_ingress_authorization(token: str) -> None:
-    # Supervisor 2026.11.0 first enforces panel_admin for the proxied request.
+    # This supported Supervisor release enforces panel_admin for the proxied request.
     # /info is available with the app token without extra Supervisor privileges.
     version = _supervisor_info(token, "/info").get("supervisor")
     match = re.fullmatch(r"([0-9]{4})\.([0-9]{1,2})\.([0-9]{1,3})", version) if isinstance(version, str) else None

@@ -1,5 +1,6 @@
 import hashlib
 import json
+import os
 import re
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timedelta, timezone
@@ -503,6 +504,12 @@ def test_preupgrade_photo_offer_repairs_and_only_unoffered_slots_get_new_dither(
     db.commit()
     path = Path(frame.path)
     path.unlink()
+    # A restore may preserve the processed image bytes and replace its filesystem metadata.
+    restored = photo_path.with_suffix(".restored")
+    restored.write_bytes(photo_path.read_bytes())
+    changed_mtime = photo_path.stat().st_mtime_ns + 10_000_000_000
+    os.utime(restored, ns=(changed_mtime, changed_mtime))
+    restored.replace(photo_path)
 
     scheduled = refresh_playback_slots(db, device, now=NOW)
     assert scheduled.frame_id == initial.frame_id
@@ -553,3 +560,181 @@ def test_manual_refresh_restores_a_damaged_generated_file(catalog):
     assert recovered.transfer_id != initial.transfer_id
     assert recovered.payload == initial.payload
     assert path.read_bytes() == initial.payload
+
+
+def test_prune_reconciles_rolled_back_generated_frames_once_per_hour(catalog, tmp_path, monkeypatch):
+    db, device, _photo = catalog
+    old = NOW - timedelta(hours=2)
+    confirmed = prepare_matter_frame(db, device.device_uid, now=old)
+    assert record_matter_frame_receipt(
+        db, device.device_uid, transfer_id=confirmed.transfer_id,
+        frame_id=confirmed.frame_id, result="ok", now=old,
+    )
+    db.commit()
+    cache = tmp_path / "frames" / "playback"
+    displayed = cache / f"{confirmed.frame_id}.raw"
+
+    refresh_playback_slots(db, device, now=NOW)
+    untracked = set(cache.glob("*.raw")) - {displayed}
+    assert untracked
+    db.rollback()
+
+    unrelated = cache / "notes.raw"
+    unrelated.write_bytes(b"fixture kept outside the generated naming convention")
+    external = tmp_path / "outside.raw"
+    external.write_bytes(b"an external fixture")
+    symlink = cache / ("f" * 24 + ".raw")
+    symlink.symlink_to(external)
+    list_names = playback.asset_names
+    sweeps = []
+
+    def count_sweep(*args):
+        sweeps.append(args)
+        return list_names(*args)
+
+    monkeypatch.setattr(playback, "asset_names", count_sweep)
+    prune_playback(db, now=NOW)
+    db.commit()
+    assert not any(path.exists() for path in untracked)
+    assert displayed.read_bytes() == confirmed.payload
+    assert unrelated.exists() and symlink.is_symlink()
+    assert external.read_bytes() == b"an external fixture"
+
+    later_orphan = cache / ("a" * 24 + ".raw")
+    later_orphan.write_bytes(b"an interrupted managed cache write")
+    prune_playback(db, now=NOW + timedelta(seconds=30))
+    db.commit()
+    assert len(sweeps) == 1 and later_orphan.exists()
+    prune_playback(db, now=NOW + timedelta(hours=1))
+    db.commit()
+    assert len(sweeps) == 2 and not later_orphan.exists()
+    assert displayed.read_bytes() == confirmed.payload
+
+
+def test_invalid_future_photo_falls_back_without_changing_playlist_or_healthy_slots(catalog, tmp_path, monkeypatch):
+    db, device, broken = catalog
+    healthy_path = tmp_path / "processed" / "healthy.png"
+    Image.new("RGB", (800, 480), (220, 80, 30)).save(healthy_path)
+    healthy = Photo(
+        original_filename="Healthy.png", stored_filename=healthy_path.name,
+        original_path=str(healthy_path), processed_path=str(healthy_path), processed_status="ready",
+    )
+    db.add(healthy)
+    db.flush()
+    playlist = [
+        {"type": "dashboard", "id": "sample"},
+        {"type": "photo", "id": str(broken.id)},
+        {"type": "photo", "id": str(healthy.id)},
+    ]
+    update_playlist(db, device, playlist, now=NOW)
+    db.commit()
+    broken_path = Path(broken.processed_path)
+    broken_path.write_bytes(b"invalid synthetic image")
+    load = playback.load_processed_photo
+    broken_reads = []
+
+    def count_broken_reads(data, path):
+        if path == str(broken_path):
+            broken_reads.append(path)
+        return load(data, path)
+
+    monkeypatch.setattr(playback, "load_processed_photo", count_broken_reads)
+    current = refresh_playback_slots(db, device, now=NOW)
+    assert current.source_type == "dashboard"
+    initial = prepare_matter_frame(db, device.device_uid, now=NOW)
+    assert record_matter_frame_receipt(
+        db, device.device_uid, transfer_id=initial.transfer_id,
+        frame_id=initial.frame_id, result="ok", now=NOW,
+    )
+    db.commit()
+    queued = playback_status(db, device, NOW)
+    assert len(queued["upcoming"]) == 5
+    assert queued["upcoming"][0]["source_type"] == "dashboard"
+    assert queued["upcoming"][1]["source_id"] == str(healthy.id)
+    assert queued["playlist"] == playlist
+
+    for seconds in (10, 20):
+        refresh_playback_slots(db, device, now=NOW + timedelta(seconds=seconds))
+        db.commit()
+        assert playback_status(db, device, NOW + timedelta(seconds=seconds)) == queued
+    assert len(broken_reads) == 1
+    assert db.get(Photo, broken.id).processed_status == "ready"
+
+    Image.new("RGB", (800, 480), (20, 130, 220)).save(broken_path)
+    refresh_playback_slots(db, device, now=NOW + timedelta(seconds=30))
+    db.commit()
+    recovered = playback_status(db, device, NOW + timedelta(seconds=30))
+    assert len(recovered["upcoming"]) == 5
+    assert recovered["current"] == queued["current"]
+    assert recovered["playlist"] == playlist
+    assert recovered["upcoming"][0]["source_id"] == str(broken.id)
+    assert recovered["upcoming"][1] == queued["upcoming"][1]
+
+
+def test_repair_does_not_substitute_for_an_already_offered_damaged_photo(catalog):
+    db, device, photo = catalog
+    update_playlist(db, device, [{"type": "photo", "id": str(photo.id)}], now=NOW)
+    offer = prepare_matter_frame(db, device.device_uid, now=NOW)
+    assert record_matter_frame_receipt(
+        db, device.device_uid, transfer_id=offer.transfer_id,
+        frame_id=offer.frame_id, result="ok", now=NOW,
+    )
+    db.commit()
+    frame = db.scalar(select(Frame).where(Frame.frame_id == offer.frame_id))
+    damage = offer.payload[:32]
+    Path(photo.processed_path).write_bytes(b"invalid synthetic image")
+    Path(frame.path).write_bytes(damage)
+
+    with pytest.raises(MatterFrameError, match="Could not repair"):
+        prepare_matter_frame(db, device.device_uid, now=NOW, repair_cache=True)
+    assert playback_status(db, device, NOW)["current"]["frame_id"] == offer.frame_id
+    assert Path(frame.path).read_bytes() == damage
+
+
+def test_repeated_photo_reuses_prepared_bytes_and_delivery_verifies_them(catalog, monkeypatch):
+    db, device, photo = catalog
+    conversion = playback.raw_photo_frame
+    conversions = []
+
+    def count_conversion(image):
+        conversions.append(image.size)
+        return conversion(image)
+
+    monkeypatch.setattr(playback, "raw_photo_frame", count_conversion)
+    update_playlist(db, device, [{"type": "photo", "id": str(photo.id)}], now=NOW)
+    first = refresh_playback_slots(db, device, now=NOW)
+    initial = prepare_matter_frame(db, device.device_uid, now=NOW)
+    assert len(conversions) == 1
+    assert {slot.frame_id for slot in db.scalars(select(PlaybackSlot))} == {first.frame_id}
+    db.commit()
+    frame = db.scalar(select(Frame).where(Frame.frame_id == initial.frame_id))
+    path = Path(frame.path)
+
+    # A wrong length is rejected even for warm reuse. One rebuild serves all six slots.
+    path.write_bytes(initial.payload[:32])
+    later = NOW + timedelta(hours=1)
+    current = refresh_playback_slots(db, device, now=later)
+    assert current.frame_id == initial.frame_id
+    assert len(conversions) == 2
+    assert path.read_bytes() == initial.payload
+
+    # An altered same-length file is checked against the offered SHA before sending.
+    damaged = bytes([initial.payload[0] ^ 1]) + initial.payload[1:]
+    path.write_bytes(damaged)
+    with pytest.raises(ValueError, match="Prepared frame is missing or invalid"):
+        preview_image(frame)
+    sent = prepare_matter_frame(db, device.device_uid, now=later, repair_cache=True)
+    assert sent.sha256 == initial.sha256 and sent.payload == initial.payload
+    assert path.read_bytes() == initial.payload
+    assert len(conversions) == 3
+
+    original = Path(photo.processed_path)
+    before = original.stat()
+    replacement = original.with_name("replacement.png")
+    Image.new("RGB", (800, 480), (30, 120, 220)).save(replacement)
+    os.utime(replacement, ns=(before.st_atime_ns, before.st_mtime_ns))
+    replacement.replace(original)
+    assert original.stat().st_mtime_ns == before.st_mtime_ns
+    refresh_playback_slots(db, device, now=later)
+    assert len(conversions) == 4
+    assert initial.frame_id not in {slot["frame_id"] for slot in playback_status(db, device, later)["upcoming"]}

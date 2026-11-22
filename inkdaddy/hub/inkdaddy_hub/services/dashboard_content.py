@@ -1,8 +1,10 @@
 from __future__ import annotations
 
 import json
+from copy import deepcopy
 from dataclasses import dataclass
 from datetime import datetime, timezone
+from functools import lru_cache
 from typing import Any
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
@@ -30,9 +32,12 @@ def get_dashboard_record(db: Session, slug: str | None) -> Dashboard | None:
 
 
 def dashboard_config(record: Dashboard | None) -> dict[str, Any]:
-    return validate_dashboard_config(
-        load_dashboard_yaml(record.current_yaml if record else SAMPLE_DASHBOARD)
-    )
+    return deepcopy(_parsed_dashboard(record.current_yaml if record else SAMPLE_DASHBOARD))
+
+
+@lru_cache(maxsize=128)
+def _parsed_dashboard(source: str) -> dict[str, Any]:
+    return validate_dashboard_config(load_dashboard_yaml(source))
 
 
 def resolve_widget_text(
