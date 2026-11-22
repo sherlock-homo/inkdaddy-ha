@@ -3,6 +3,7 @@ from __future__ import annotations
 import http.client
 import json
 import os
+import re
 import secrets
 import socket
 import subprocess
@@ -14,6 +15,7 @@ from tempfile import TemporaryDirectory
 from typing import Any
 
 SUPERVISOR_IP = "172.30.32.2"
+MINIMUM_INGRESS_SUPERVISOR = (2026, 11, 0)
 MATTER_EXECUTABLE = Path("/opt/inkdaddy/matter_controller/src/server.mjs")
 READ_METHODS = {"GET", "HEAD", "OPTIONS"}
 REQUEST_MARKER = (b"x-inkdaddy-request", b"1")
@@ -96,17 +98,35 @@ async def ingress_only(
     await app(scope, bounded_receive, secure_send)
 
 
-def ingress_port(token: str) -> int:
+def _supervisor_info(token: str, path: str) -> dict[str, Any]:
     connection = http.client.HTTPConnection("supervisor", timeout=10)
     try:
-        connection.request("GET", "/addons/self/info", headers={"Authorization": f"Bearer {token}"})
+        connection.request("GET", path, headers={"Authorization": f"Bearer {token}"})
         response = connection.getresponse()
         if response.status != 200:
-            raise RuntimeError(f"Supervisor app info returned HTTP {response.status}.")
+            raise RuntimeError(f"Supervisor info returned HTTP {response.status}.")
         payload = json.load(response)
+    except (OSError, http.client.HTTPException, ValueError):
+        raise RuntimeError("Cannot read authenticated Home Assistant Supervisor info.") from None
     finally:
         connection.close()
-    port = payload.get("data", {}).get("ingress_port")
+    data = payload.get("data") if isinstance(payload, dict) else None
+    if not isinstance(data, dict):
+        raise RuntimeError("Supervisor did not return valid system info.")
+    return data
+
+
+def require_ingress_authorization(token: str) -> None:
+    # Supervisor 2026.11.0 first enforces panel_admin for the proxied request.
+    # /info is available with the app token without extra Supervisor privileges.
+    version = _supervisor_info(token, "/info").get("supervisor")
+    match = re.fullmatch(r"([0-9]{4})\.([0-9]{1,2})\.([0-9]{1,3})", version) if isinstance(version, str) else None
+    if not match or tuple(map(int, match.groups())) < MINIMUM_INGRESS_SUPERVISOR:
+        raise RuntimeError("Update Home Assistant Supervisor to 2026.11.0 or later for administrator-only Ingress.")
+
+
+def ingress_port(token: str) -> int:
+    port = _supervisor_info(token, "/addons/self/info").get("ingress_port")
     if type(port) is not int or not 62000 <= port <= 65500:
         raise RuntimeError("Supervisor did not assign an Ingress port.")
     return port
@@ -192,6 +212,7 @@ def main() -> None:
     if not token:
         raise RuntimeError("Supervisor did not supply an app token.")
     os.umask(0o077)
+    require_ingress_authorization(token)
     port = ingress_port(token)
 
     with managed_matter():

@@ -1,7 +1,7 @@
 import { useEffect, useState } from "react";
 import { Shell } from "./components/Shell";
 import { apiJson } from "./lib/api";
-import type { RouteKey } from "./lib/types";
+import type { PlaybackSource, RouteKey } from "./lib/types";
 import { Connect } from "./pages/Connect";
 import { DashboardsPage } from "./pages/Dashboards";
 import { DevicesPage } from "./pages/Devices";
@@ -30,12 +30,21 @@ function routeFromHash(): RouteKey {
 }
 
 export function App() {
+  const [displayUid, setDisplayUid] = useState("");
+  const [playlistSource, setPlaylistSource] = useState<PlaybackSource | null>(null);
   const [route, setRouteState] = useState<RouteKey>(routeFromHash);
   const [health, setHealth] = useState<"loading" | "ok" | "offline">("loading");
 
   const setRoute = (nextRoute: RouteKey) => {
+    if (nextRoute !== "home") setPlaylistSource(null);
     window.location.hash = nextRoute;
     setRouteState(nextRoute);
+  };
+
+  const openDisplay = (uid?: string, source: PlaybackSource | null = null) => {
+    if (uid) setDisplayUid(uid);
+    setPlaylistSource(source);
+    setRoute("home");
   };
 
   useEffect(() => {
@@ -56,12 +65,18 @@ export function App() {
         <span className={`status-dot ${health === "ok" ? "good" : health === "loading" ? "neutral" : "danger"}`} />
         <span>Hub API: {health}</span>
       </div>
-      {route === "home" && <Home onConnect={() => setRoute("connect")} />}
-      {route === "connect" && <Connect />}
-      {route === "photos" && <PhotosPage />}
+      {route === "home" && <Home
+        onConnect={() => setRoute("connect")}
+        preferredUid={displayUid}
+        onDisplaySelected={setDisplayUid}
+        playlistSource={playlistSource}
+        onPlaylistSourceUsed={() => setPlaylistSource(null)}
+      />}
+      {route === "connect" && <Connect onOpenDisplay={openDisplay} />}
+      {route === "photos" && <PhotosPage onAddToPlaylist={(source) => openDisplay(undefined, source)} />}
       {route === "dashboards" && <DashboardsPage />}
       {route === "integrations" && <IntegrationsPage />}
-      {route === "devices" && <DevicesPage />}
+      {route === "devices" && <DevicesPage onConnect={() => setRoute("connect")} onOpenDisplay={openDisplay} />}
       {route === "home-assistant" && <HomeAssistantPage />}
       {route !== "home" &&
         route !== "connect" &&

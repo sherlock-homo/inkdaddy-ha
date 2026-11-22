@@ -16,7 +16,7 @@ from sqlalchemy.orm import Session
 from ..config import HubSettings, get_settings
 from ..models import Album, AlbumItem, Photo
 from .asset_storage import read_asset, remove_asset
-from .palette import WAVESHARE_7COLOR_6, raw_frame_from_image
+from .palette import WAVESHARE_7COLOR_6, raw_photo_frame
 from .rendering import render_preview_png_bytes
 
 LOGGER = logging.getLogger(__name__)
@@ -174,7 +174,7 @@ def process_photo_file(
 
     processed.save(processed_path, format="PNG")
     preview_path.write_bytes(render_preview_png_bytes(processed))
-    raw, checksum = raw_frame_from_image(processed, WAVESHARE_7COLOR_6)
+    raw, checksum = raw_photo_frame(processed)
     frame_path.write_bytes(raw)
     return ProcessedPhotoFiles(
         processed_path=processed_path,

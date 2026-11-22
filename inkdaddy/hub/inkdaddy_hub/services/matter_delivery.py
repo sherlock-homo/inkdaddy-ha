@@ -3,8 +3,8 @@ from __future__ import annotations
 import logging
 import secrets
 import threading
-import time
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
+from time import monotonic
 
 from sqlalchemy import select
 from sqlalchemy.exc import SQLAlchemyError
@@ -13,7 +13,12 @@ from sqlalchemy.orm import Session
 from ..database import SessionLocal
 from ..models import Device, MatterFrameBinding, MatterPlaybackIntent, Playback
 from .matter_controller import MatterController, MatterControllerError, event_number
-from .matter_frame_broker import MatterFrameError, prepare_matter_frame, record_matter_frame_receipt
+from .matter_frame_broker import (
+    MatterFrameError,
+    load_matter_frame_payload,
+    prepare_matter_frame,
+    record_matter_frame_receipt,
+)
 from .playback import (
     ACTION_NAMES,
     apply_playback_action,
@@ -27,6 +32,10 @@ LOGGER = logging.getLogger(__name__)
 # The panel can remain busy for two minutes. Completion events normally
 # arrive much sooner and keep receipt checks inside the controller process.
 MISSING_RECEIPT_RECHECK_SECONDS = 120
+
+
+def _time(now: float | None) -> float:
+    return monotonic() if now is None else now
 
 
 @dataclass
@@ -68,7 +77,7 @@ def mirror_playback(
     target: str,
     attempt: PlaybackAttempt | None,
     *,
-    now: float,
+    now: float | None = None,
 ) -> PlaybackAttempt | None:
     with SessionLocal() as db:
         binding = db.get(MatterFrameBinding, device_id)
@@ -78,12 +87,12 @@ def mirror_playback(
         revision, playing = intent.revision, intent.playing
     if attempt is None or attempt.revision != revision:
         attempt = PlaybackAttempt(revision)
-    if attempt.next_attempt > now:
+    if attempt.next_attempt > _time(now):
         return attempt
     try:
         controller.set_playback(target, playing)
     except MatterControllerError:
-        attempt.next_attempt = now + attempt.retry_seconds
+        attempt.next_attempt = _time(now) + attempt.retry_seconds
         attempt.retry_seconds = min(attempt.retry_seconds * 2, 60)
         return attempt
     with SessionLocal() as db:
@@ -135,7 +144,7 @@ def deliver_frame(
     target: str,
     attempt: DeliveryAttempt | None,
     *,
-    now: float,
+    now: float | None = None,
 ) -> DeliveryAttempt | None:
     with SessionLocal() as db:
         begin_playback_write(db)
@@ -143,41 +152,43 @@ def deliver_frame(
         if device is None:
             return None
         uid = device.device_uid
-        offer = prepare_matter_frame(db, uid, repair_cache=True)
+        offer = prepare_matter_frame(db, uid, include_payload=False)
         if (
             attempt is not None and attempt.transfer_id == offer.transfer_id
-            and attempt.renew_transfer and now >= attempt.next_attempt
+            and attempt.renew_transfer and _time(now) >= attempt.next_attempt
         ):
             invalidate_matter_transfer(db, device_id)
-            offer = prepare_matter_frame(db, uid, repair_cache=True)
-            attempt.transfer_id = offer.transfer_id
-            attempt.submitted = False
-            attempt.renew_transfer = False
+            offer = prepare_matter_frame(db, uid, include_payload=False)
+            attempt = replace(attempt, transfer_id=offer.transfer_id, submitted=False, renew_transfer=False)
         terminal_failure = (
             not offer.acknowledged
             and (attempt is None or attempt.transfer_id != offer.transfer_id)
             and matter_transfer_failed(db, device_id, offer.transfer_id)
         )
+        if offer.acknowledged:
+            db.commit()
+            return None
+        if terminal_failure:
+            db.commit()
+            return DeliveryAttempt(offer.transfer_id, next_attempt=float("inf"))
+        if attempt is None or attempt.transfer_id != offer.transfer_id:
+            attempt = DeliveryAttempt(offer.transfer_id)
+        if attempt.next_attempt > _time(now):
+            db.commit()
+            return attempt
+        payload = None if attempt.submitted else load_matter_frame_payload(db, device, offer)
         db.commit()
-    if offer.acknowledged:
-        return None
-    if terminal_failure:
-        return DeliveryAttempt(offer.transfer_id, next_attempt=float("inf"))
-    if attempt is None or attempt.transfer_id != offer.transfer_id:
-        attempt = DeliveryAttempt(offer.transfer_id)
-    if attempt.next_attempt > now:
-        return attempt
 
     try:
-        if attempt.submitted:
+        if payload is None:
             response = _delivery_receipt(controller, target, attempt, now)
         else:
-            response = controller.send(target, offer.transfer_id, offer.payload, offer.sha256)
+            response = controller.send(target, offer.transfer_id, payload, offer.sha256)
         state = response.get("state")
         if response.get("transfer_id") != offer.transfer_id:
             raise MatterControllerError("The Matter receipt did not match the pending transfer.")
     except MatterControllerError:
-        attempt.retry_later(now)
+        attempt.retry_later(_time(now))
         return attempt
 
     if state == "displayed":
@@ -197,16 +208,17 @@ def deliver_frame(
                     device.mesh_connected = True
                     db.commit()
         return None
+    completed = _time(now)
     if state == "queued":
         if not attempt.submitted:
-            attempt.next_radio_check = now + MISSING_RECEIPT_RECHECK_SECONDS
+            attempt.next_radio_check = completed + MISSING_RECEIPT_RECHECK_SECONDS
         attempt.submitted = True
-        attempt.next_attempt = now + 5
+        attempt.next_attempt = completed + 5
         attempt.retry_seconds = 5
     elif state == "failed":
         attempt.panel_failures += 1
         attempt.renew_transfer = True
-        attempt.next_attempt = now + 15 * attempt.panel_failures
+        attempt.next_attempt = completed + 15 * attempt.panel_failures
         if attempt.panel_failures >= 3:
             attempt.next_attempt = float("inf")
             with SessionLocal() as db:
@@ -216,21 +228,23 @@ def deliver_frame(
                     db.commit()
     else:
         attempt.submitted = False
-        attempt.retry_later(now)
+        attempt.retry_later(completed)
     return attempt
 
 
 def _delivery_receipt(
-    controller: MatterController, target: str, attempt: DeliveryAttempt, now: float
+    controller: MatterController, target: str, attempt: DeliveryAttempt, now: float | None
 ) -> dict[str, object]:
     response = controller.cached_receipt(target, attempt.transfer_id)
     if response.get("transfer_id") != attempt.transfer_id:
         raise MatterControllerError("The cached Matter receipt did not match the pending transfer.")
     if response.get("state") in ("displayed", "failed"):
         return response
-    if now >= attempt.next_radio_check:
-        attempt.next_radio_check = now + MISSING_RECEIPT_RECHECK_SECONDS
-        return controller.receipt(target, attempt.transfer_id)
+    if _time(now) >= attempt.next_radio_check:
+        try:
+            return controller.receipt(target, attempt.transfer_id)
+        finally:
+            attempt.next_radio_check = _time(now) + MISSING_RECEIPT_RECHECK_SECONDS
     return {"transfer_id": attempt.transfer_id, "state": "queued"}
 
 
@@ -258,7 +272,7 @@ def run_matter_delivery(stop_event: threading.Event, controller: MatterControlle
                 if current_offer_id is None:
                     _deliver_binding_frame(controller, binding, attempts)
                 playback_attempt = mirror_playback(
-                    controller, *binding, playback_attempts.get(binding), now=time.monotonic()
+                    controller, *binding, playback_attempts.get(binding)
                 )
                 if playback_attempt is None:
                     playback_attempts.pop(binding, None)
@@ -277,7 +291,7 @@ def _deliver_binding_frame(
     attempts: dict[tuple[int, str], DeliveryAttempt],
 ) -> None:
     try:
-        attempt = deliver_frame(controller, *binding, attempts.get(binding), now=time.monotonic())
+        attempt = deliver_frame(controller, *binding, attempts.get(binding))
     except MatterFrameError as exc:
         LOGGER.warning("Could not prepare a frame for Matter node %s. %s", binding[1], exc)
         return

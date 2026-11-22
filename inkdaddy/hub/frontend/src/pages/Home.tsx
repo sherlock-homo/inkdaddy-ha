@@ -2,7 +2,7 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { EpaperPreview } from "../components/EpaperPreview";
 import { StatusBadge } from "../components/StatusBadge";
 import { apiJson, apiPath } from "../lib/api";
-import type { DeviceRecord, FrameSlot, Playback } from "../lib/types";
+import type { DeviceRecord, FrameSlot, Playback, PlaybackSource } from "../lib/types";
 import { PlaylistEditor } from "./PlaylistEditor";
 
 type PlaybackAction = "previous_content" | "next_content" | "refresh_current" | "pause" | "play";
@@ -15,9 +15,15 @@ const actionMessages: Record<PlaybackAction, string> = {
   play: "Hourly slideshow resumed."
 };
 
-export function Home({ onConnect }: { onConnect: () => void }) {
+export function Home({ onConnect, preferredUid, onDisplaySelected, playlistSource, onPlaylistSourceUsed }: {
+  onConnect: () => void;
+  preferredUid: string;
+  onDisplaySelected: (uid: string) => void;
+  playlistSource: PlaybackSource | null;
+  onPlaylistSourceUsed: () => void;
+}) {
   const [devices, setDevices] = useState<DeviceRecord[]>([]);
-  const [selectedUid, setSelectedUid] = useState("");
+  const [selectedUid, setSelectedUid] = useState(preferredUid);
   const [registryReady, setRegistryReady] = useState(false);
   const [registryError, setRegistryError] = useState("");
   const [playback, setPlayback] = useState<Playback | null>(null);
@@ -25,12 +31,25 @@ export function Home({ onConnect }: { onConnect: () => void }) {
   const [actionError, setActionError] = useState("");
   const [message, setMessage] = useState("");
   const [busy, setBusy] = useState(false);
-  const [editingQueue, setEditingQueue] = useState(false);
+  const [editingPath, setEditingPath] = useState<string | null>(null);
+  const [draftSource, setDraftSource] = useState<PlaybackSource | null>(null);
+  const [draftDirty, setDraftDirty] = useState(false);
+  const [savingPlaylist, setSavingPlaylist] = useState(false);
+  const actionInFlight = useRef(false);
   const actionRevision = useRef(0);
   const display = devices.find((device) => device.device_uid === selectedUid)
     ?? devices.find((device) => device.mesh_connected) ?? devices[0];
   const deviceUid = display?.device_uid;
   const playbackPath = deviceUid ? `/api/devices/${encodeURIComponent(deviceUid)}/playback` : null;
+  const editingQueue = editingPath !== null && editingPath === playbackPath;
+
+  useEffect(() => {
+    if (!playlistSource || !playback || !playbackPath) return;
+    setDraftSource(playlistSource);
+    setDraftDirty(true);
+    setEditingPath(playbackPath);
+    onPlaylistSourceUsed();
+  }, [playlistSource, playback, playbackPath, onPlaylistSourceUsed]);
 
   useEffect(() => {
     const controller = new AbortController();
@@ -43,8 +62,8 @@ export function Home({ onConnect }: { onConnect: () => void }) {
           ? current : (payload.devices.find((device) => device.mesh_connected) ?? payload.devices[0])?.device_uid ?? "");
         setRegistryError("");
         setRegistryReady(true);
-      } catch (error) {
-        if (!controller.signal.aborted) setRegistryError(errorMessage(error, "Display registry unavailable."));
+      } catch {
+        if (!controller.signal.aborted) setRegistryError("Display registry unavailable.");
       }
     };
     void load();
@@ -60,12 +79,14 @@ export function Home({ onConnect }: { onConnect: () => void }) {
     setPlaybackError("");
     setActionError("");
     setMessage("");
-    setEditingQueue(false);
+    setEditingPath(null);
+    setDraftSource(null);
+    setDraftDirty(false);
     if (!playbackPath) return;
     const controller = new AbortController();
     let inFlight = false;
     const load = async () => {
-      if (inFlight) return;
+      if (inFlight || actionInFlight.current) return;
       inFlight = true;
       const revision = actionRevision.current;
       try {
@@ -73,9 +94,9 @@ export function Home({ onConnect }: { onConnect: () => void }) {
         if (controller.signal.aborted || actionRevision.current !== revision) return;
         setPlayback(next);
         setPlaybackError("");
-      } catch (error) {
+      } catch {
         if (!controller.signal.aborted && actionRevision.current === revision) {
-          setPlaybackError(errorMessage(error, "Unable to check playback."));
+          setPlaybackError("Unable to check playback. Retrying…");
         }
       } finally {
         inFlight = false;
@@ -90,7 +111,8 @@ export function Home({ onConnect }: { onConnect: () => void }) {
   }, [playbackPath]);
 
   const performAction = async (action: PlaybackAction) => {
-    if (!deviceUid || busy) return;
+    if (!deviceUid || actionInFlight.current) return;
+    actionInFlight.current = true;
     ++actionRevision.current;
     setBusy(true);
     setMessage("");
@@ -103,9 +125,10 @@ export function Home({ onConnect }: { onConnect: () => void }) {
       ++actionRevision.current;
       setPlayback(result.playback);
       setMessage(actionMessages[action]);
-    } catch (error) {
-      setActionError(errorMessage(error, "Playback command failed."));
+    } catch {
+      setActionError("Unable to send the playback command. Check the display and try again.");
     } finally {
+      actionInFlight.current = false;
       setBusy(false);
     }
   };
@@ -113,9 +136,22 @@ export function Home({ onConnect }: { onConnect: () => void }) {
   const playlistSaved = useCallback((next: Playback) => {
     ++actionRevision.current;
     setPlayback(next);
-    setEditingQueue(false);
+    setEditingPath(null);
+    setDraftSource(null);
+    setDraftDirty(false);
     setMessage("Playlist saved.");
   }, []);
+
+  function togglePlaylist() {
+    if (editingQueue) {
+      if (draftDirty && !window.confirm("Discard changes to this playlist?")) return;
+      setEditingPath(null);
+      setDraftSource(null);
+      setDraftDirty(false);
+    } else {
+      setEditingPath(playbackPath);
+    }
+  }
 
   const current = playback?.current;
   const pending = playback?.pending;
@@ -133,7 +169,11 @@ export function Home({ onConnect }: { onConnect: () => void }) {
         {devices.length > 1 && (
           <label className="display-picker">
             Display
-            <select value={deviceUid} disabled={busy || editingQueue} onChange={(event) => setSelectedUid(event.target.value)}>
+            <select value={deviceUid} disabled={busy || editingQueue} onChange={(event) => {
+              setPlayback(null);
+              setSelectedUid(event.target.value);
+              onDisplaySelected(event.target.value);
+            }}>
               {devices.map((device) => <option key={device.device_uid} value={device.device_uid}>{device.name}</option>)}
             </select>
           </label>
@@ -147,7 +187,9 @@ export function Home({ onConnect }: { onConnect: () => void }) {
       {!registryReady && !registryError && <p className="muted-text" role="status">Loading displays…</p>}
       {registryReady && !display && (
         <section className="empty-state compact">
-          <div><h2>No display registered</h2><p>Connect inkDaddy to start publishing frames.</p></div>
+          <div><h2>No display registered</h2><p>{playlistSource
+            ? "Connect a display before you can add this item to its playlist."
+            : "Connect inkDaddy to start publishing frames."}</p></div>
         </section>
       )}
 
@@ -187,7 +229,7 @@ export function Home({ onConnect }: { onConnect: () => void }) {
                   </div>
                 </div>
               )}
-              {!pending && message && <p className="preview-message" role="status">{message}</p>}
+              {message && <p className="preview-message" role="status">{message}</p>}
               {playback?.syncing_controls && (
                 <p className="preview-message" role="status">Syncing play/pause with the display…</p>
               )}
@@ -201,12 +243,23 @@ export function Home({ onConnect }: { onConnect: () => void }) {
                   <h2 id="upcoming-title">Up next</h2>
                   <p>{playback?.paused ? "Hourly schedule paused" : "Next five scheduled frames"}</p>
                 </div>
-                <button className="secondary-button" disabled={busy || !playback} onClick={() => setEditingQueue((value) => !value)}>
+                <button className="secondary-button" disabled={busy || savingPlaylist || !playback} onClick={togglePlaylist}>
                   {editingQueue ? "Close editor" : "Edit playlist"}
                 </button>
               </div>
               {editingQueue && playbackPath && playback ? (
-                <PlaylistEditor path={playbackPath} playlist={playback.playlist} onSave={playlistSaved} />
+                <PlaylistEditor
+                  key={playbackPath}
+                  path={playbackPath}
+                  playlist={playback.playlist}
+                  defaultSource={display.selected_source_id && ["dashboard", "album", "photo"].includes(display.selected_source_type)
+                    ? { type: display.selected_source_type as PlaybackSource["type"], id: display.selected_source_id }
+                    : { type: "dashboard", id: "sample" }}
+                  initialSource={draftSource}
+                  onSave={playlistSaved}
+                  onDirtyChange={setDraftDirty}
+                  onBusyChange={setSavingPlaylist}
+                />
               ) : (
                 upcoming.length ? <ol className="upcoming-list">{upcoming.map((frame) => <UpcomingFrame key={frame.scheduled_at} frame={frame} />)}</ol>
                   : <p className="muted-text">{playback ? "No frames are scheduled." : "Checking the schedule…"}</p>
@@ -215,7 +268,7 @@ export function Home({ onConnect }: { onConnect: () => void }) {
           </div>
 
           <section className="display-details" aria-label="Display status">
-            <span><StatusBadge tone={display.mesh_connected ? "good" : "warn"}>{display.mesh_connected ? "Thread connected" : "Thread unavailable"}</StatusBadge></span>
+            <span><StatusBadge tone={display.mesh_connected ? "good" : "warn"}>{display.mesh_connected ? "Thread last reported online" : "No recent Thread connection"}</StatusBadge></span>
             <span><strong>Battery</strong> {display.battery_percent == null ? "Unavailable" : `${Math.round(display.battery_percent)}%`}</span>
             <span><strong>Last seen</strong> {display.last_seen_at ? formatDate(display.last_seen_at) : "Never"}</span>
           </section>
@@ -240,8 +293,4 @@ function UpcomingFrame({ frame }: { frame: FrameSlot }) {
 function formatDate(value: string): string {
   const timestamp = /(?:Z|[+-]\d{2}:\d{2})$/i.test(value) ? value : `${value}Z`;
   return new Date(timestamp).toLocaleString(undefined, { weekday: "short", hour: "numeric", minute: "2-digit" });
-}
-
-function errorMessage(error: unknown, fallback: string): string {
-  return error instanceof Error ? error.message : fallback;
 }

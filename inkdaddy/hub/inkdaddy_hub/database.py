@@ -5,7 +5,7 @@ from collections.abc import Generator
 from .config import get_settings
 
 try:
-    from sqlalchemy import create_engine
+    from sqlalchemy import create_engine, inspect
     from sqlalchemy.orm import DeclarativeBase, Session, sessionmaker
 except ModuleNotFoundError as exc:  # pragma: no cover - exercised before deps are installed
     raise RuntimeError(
@@ -33,6 +33,9 @@ def init_db() -> None:
         if connection.dialect.name == "sqlite":
             connection.exec_driver_sql("BEGIN IMMEDIATE")
         Base.metadata.create_all(bind=connection)
+        columns = {column["name"] for column in inspect(connection).get_columns("ha_entity_cache")}
+        if "source_reported_at" not in columns:
+            connection.exec_driver_sql("ALTER TABLE ha_entity_cache ADD COLUMN source_reported_at TIMESTAMP")
 
 
 def get_db() -> Generator[Session, None, None]:

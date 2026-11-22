@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import json
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Any
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
@@ -12,10 +12,10 @@ from sqlalchemy.orm import Session
 
 from ..models import Dashboard, Device, HAEntityCache, Setting
 from .dashboard import SAMPLE_DASHBOARD, load_dashboard_yaml, validate_dashboard_config
+from .dashboard_sensors import UNAVAILABLE_STATES, dashboard_eligible, entity_attributes
 from .rendering import _font
 
 SITE_SETTING = "home_assistant.site"
-_UNAVAILABLE_ENTITY_STATES = ("unavailable", "unknown")
 
 
 @dataclass(frozen=True)
@@ -36,7 +36,13 @@ def dashboard_config(record: Dashboard | None) -> dict[str, Any]:
 
 
 def resolve_widget_text(
-    db: Session, config: dict[str, Any], timestamp: datetime, device: Device | None
+    db: Session,
+    config: dict[str, Any],
+    timestamp: datetime,
+    device: Device | None,
+    *,
+    observed_at: datetime | None = None,
+    legacy: bool = False,
 ) -> list[WidgetText]:
     site_setting = db.get(Setting, SITE_SETTING)
     site = json.loads(site_setting.value_json) if site_setting else {}
@@ -44,6 +50,7 @@ def resolve_widget_text(
         local = timestamp.astimezone(ZoneInfo(site.get("time_zone") or "UTC"))
     except (ValueError, ZoneInfoNotFoundError):
         local = timestamp.astimezone(ZoneInfo("UTC"))
+    observed_at = observed_at or datetime.now(timezone.utc)
     widgets: list[WidgetText] = []
     for widget in config["widgets"]:
         options = widget["options"]
@@ -51,10 +58,9 @@ def resolve_widget_text(
         source_type = source.get("type")
         label = str(options.get("label") or widget.get("title") or "")
         if source_type == "clock":
+            detail = local.strftime("%A, %B %d") if legacy else local.strftime("For %a, %b %d")
             widgets.append(
-                WidgetText(
-                    label or "Local time", local.strftime("%H:%M"), local.strftime("%A, %B %d")
-                )
+                WidgetText(label or ("Local time" if legacy else "Time at refresh"), local.strftime("%H:%M"), detail)
             )
         elif source_type == "location":
             zone = db.get(HAEntityCache, "zone.home")
@@ -74,34 +80,35 @@ def resolve_widget_text(
                 )
             )
         elif source.get("entity_id") or source_type == "weather":
-            widgets.append(_entity_widget_text(db, widget, label))
+            widgets.append(_entity_widget_text(db, widget, label, observed_at, legacy=legacy))
         else:
             widgets.append(WidgetText(label, str(options.get("text", "Unavailable"))))
     return widgets
 
 
-def _entity_widget_text(db: Session, widget: dict[str, Any], label: str) -> WidgetText:
+def _entity_widget_text(
+    db: Session, widget: dict[str, Any], label: str, observed_at: datetime, *, legacy: bool
+) -> WidgetText:
     source = widget["source"]
     entity_id = source.get("entity_id")
     if entity_id:
         entity = db.get(HAEntityCache, str(entity_id))
     else:
-        entity = db.scalar(
+        providers = db.scalars(
             select(HAEntityCache)
             .where(
                 HAEntityCache.domain == "weather",
                 HAEntityCache.state.is_not(None),
-                HAEntityCache.state.not_in(_UNAVAILABLE_ENTITY_STATES),
+                HAEntityCache.state.not_in(UNAVAILABLE_STATES),
             )
             .order_by(HAEntityCache.entity_id)
-            .limit(1)
         )
-    if not entity or entity.state is None or entity.state in _UNAVAILABLE_ENTITY_STATES:
+        entity = next((provider for provider in providers if legacy or dashboard_eligible(provider, observed_at)), None)
+    if not entity or not entity.state or entity.state in UNAVAILABLE_STATES:
         return WidgetText(label or str(entity_id or "Weather"), "Unavailable")
-    try:
-        attrs = json.loads(entity.attributes_json)
-    except json.JSONDecodeError:
-        attrs = {}
+    if not legacy and not dashboard_eligible(entity, observed_at):
+        return WidgetText(label or entity.name or entity.entity_id, "Unavailable")
+    attrs = entity_attributes(entity)
     unit = widget["options"].get("unit") or attrs.get("unit_of_measurement") or ""
     value = entity.state
     detail = ""

@@ -206,6 +206,7 @@ def test_first_frame_for_new_link_uses_local_home_overview(peer, packing, app_ca
             worker.home_assistant.HAEntity(
                 "weather.test_house", "weather", "Forecast", "partlycloudy",
                 {"temperature": 16, "temperature_unit": "°C"},
+                reported_at=clock.now.replace(tzinfo=None),
             )
         ]
 
@@ -251,7 +252,9 @@ def test_first_frame_for_new_link_uses_local_home_overview(peer, packing, app_ca
         assert [slot["source_id"] for slot in state["upcoming"]] == ["sample"] * 5
         with sessions() as db:
             config = dashboard_config(None)
-            widgets = resolve_widget_text(db, config, NOW.replace(minute=0), db.get(Device, device_id))
+            widgets = resolve_widget_text(
+                db, config, NOW.replace(minute=0), db.get(Device, device_id), observed_at=clock.now
+            )
             assert [widget.value for widget in widgets[:3]] == ["11:00", "Partly cloudy", "Test House"]
             assert widgets[1].detail == "16 °C"
             expected, _digest = raw_frame_from_image(render_dashboard(config, widgets), dither=True)
@@ -293,6 +296,7 @@ def test_rendered_queue_to_case_bdx_and_exact_display_receipt(peer, app_catalog,
                 domain="sensor",
                 name="Room temperature",
                 state="21",
+                source_reported_at=clock.now.replace(tzinfo=None),
                 attributes_json='{"unit_of_measurement": "°C"}',
             )
         )
@@ -454,7 +458,9 @@ widgets:
     clock.now = NOW.replace(minute=0) + timedelta(hours=1)
     assert datetime.fromisoformat(warmed["scheduled_at"]) == clock.now
     with sessions() as db:
-        db.get(HAEntityCache, "sensor.room").state = "24"
+        room = db.get(HAEntityCache, "sensor.room")
+        room.state = "24"
+        room.source_reported_at = clock.now.replace(tzinfo=None)
         db.commit()
     worker.run_playback_cycle(now=clock.now)
     advanced = response_json(client.get(f"{route}/playback"))
@@ -468,7 +474,9 @@ widgets:
     assert third is not None and third.transfer_id not in {first.transfer_id, second.transfer_id}
     with sessions() as db:
         config = dashboard_config(get_dashboard_record(db, hourly["id"]))
-        widgets = resolve_widget_text(db, config, clock.now, db.get(Device, device_id))
+        widgets = resolve_widget_text(
+            db, config, clock.now, db.get(Device, device_id), observed_at=clock.now
+        )
         assert [widget.value for widget in widgets] == ["17:00", "24 °C"]
         expected_hourly, _digest = raw_frame_from_image(
             render_dashboard(config, widgets), dither=True

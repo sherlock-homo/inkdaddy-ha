@@ -20,6 +20,7 @@ from ..models import (
     PlaybackSlot,
 )
 from ..services.frame_pipeline import prepare_device_frame, render_device_image
+from ..services.home_assistant import supervisor_connection
 from ..services.matter_delivery import queue_playback_mirror
 from ..services.playback import (
     ACTION_NAMES,
@@ -38,6 +39,12 @@ from ..services.playback import (
 from ..services.rendering import render_preview_png_bytes
 
 router = APIRouter(prefix="/api/devices", tags=["devices"])
+MANAGED_DEVICE_FIELDS = frozenset({"name", "selected_source_type", "selected_source_id"})
+
+
+def require_standalone_device_api() -> None:
+    if supervisor_connection() is not None:
+        raise HTTPException(status_code=409, detail="Connect and manage displays through Home Assistant Matter.")
 
 
 def _device_payload(device: Device) -> dict[str, object]:
@@ -122,6 +129,7 @@ def list_devices(db: Session = Depends(get_db)) -> dict[str, object]:
 
 @router.post("")
 def create_device(payload: dict[str, object], db: Session = Depends(get_db)) -> dict[str, object]:
+    require_standalone_device_api()
     return _device_payload(create_or_update_device(db, payload))
 
 
@@ -132,9 +140,15 @@ def get_device(device_id: str, db: Session = Depends(get_db)) -> dict[str, objec
 
 @router.put("/{device_id}")
 def update_device(device_id: str, payload: dict[str, object], db: Session = Depends(get_db)) -> dict[str, object]:
+    if supervisor_connection() is not None and set(payload) - MANAGED_DEVICE_FIELDS:
+        raise HTTPException(status_code=422, detail="Only the display name and content source can be edited here.")
     begin_playback_write(db)
     device = _get_device(db, device_id)
     previous_selection = (device.selected_source_type, device.selected_source_id)
+    if (name := payload.get("name")) is not None:
+        if not isinstance(name, str) or not name.strip() or len(name.strip()) > 255:
+            raise HTTPException(status_code=422, detail="Enter a display name between 1 and 255 characters.")
+        payload = {**payload, "name": name.strip()}
     _apply_device_payload(device, payload)
     if previous_selection != (device.selected_source_type, device.selected_source_id):
         reset_selection(db, device)
@@ -161,6 +175,7 @@ def delete_device(device_id: str, db: Session = Depends(get_db)) -> dict[str, ob
 
 @router.post("/{device_id}/heartbeat")
 def heartbeat(device_id: str, payload: dict[str, object], db: Session = Depends(get_db)) -> dict[str, object]:
+    require_standalone_device_api()
     begin_playback_write(db)
     device = _get_device(db, device_id)
     if db.get(MatterFrameBinding, device.id) is not None:
@@ -207,6 +222,7 @@ def status_history(device_id: str, limit: int = 50, db: Session = Depends(get_db
 
 @router.get("/{device_id}/frame-manifest")
 def frame_manifest(device_id: str, refresh_count: int = 0, db: Session = Depends(get_db)) -> dict[str, object]:
+    require_standalone_device_api()
     begin_playback_write(db)
     device = _get_device(db, device_id)
     if db.get(MatterFrameBinding, device.id) is not None:
@@ -345,6 +361,7 @@ def update_device_config(device_id: str, payload: dict[str, object], db: Session
 
 @router.post("/{device_id}/refresh-result")
 def refresh_result(device_id: str, payload: dict[str, object], db: Session = Depends(get_db)) -> dict[str, object]:
+    require_standalone_device_api()
     begin_playback_write(db)
     device = _get_device(db, device_id)
     if db.get(MatterFrameBinding, device.id) is not None:

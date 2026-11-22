@@ -4,13 +4,14 @@ from fastapi import APIRouter, Depends
 from sqlalchemy.orm import Session
 
 from ..database import get_db
-from .devices import _device_payload, create_or_update_device
+from .devices import _device_payload, create_or_update_device, require_standalone_device_api
 
 router = APIRouter(prefix="/api/simulator", tags=["simulator"])
 
 
 @router.post("/devices")
 def create_simulated_device(payload: dict[str, object], db: Session = Depends(get_db)) -> dict[str, object]:
+    require_standalone_device_api()
     record = create_or_update_device(
         db,
         {

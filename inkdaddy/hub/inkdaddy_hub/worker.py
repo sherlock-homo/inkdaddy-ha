@@ -7,17 +7,18 @@ import threading
 import time
 from datetime import datetime, timezone
 
-from sqlalchemy import delete, select
+from sqlalchemy import select
 
 from .config import get_settings
 from .database import SessionLocal, init_db
-from .models import Device, HAEntityCache, Setting
+from .models import Device, Setting
 from .services.dashboard_content import SITE_SETTING
 from .services import home_assistant
 from .services.playback import begin_playback_write, prune_playback, refresh_playback_slots
 from .services.updates import run_auto_update_cycle
 
 LOGGER = logging.getLogger(__name__)
+HA_REFRESH_SECONDS = 1800
 
 
 def refresh_home_assistant() -> None:
@@ -39,17 +40,7 @@ def refresh_home_assistant() -> None:
     with SessionLocal() as db:
         begin_playback_write(db)
         if states is not None:
-            db.execute(delete(HAEntityCache))
-            db.add_all(
-                HAEntityCache(
-                    entity_id=entity.entity_id,
-                    domain=entity.domain,
-                    name=entity.name,
-                    state=entity.state,
-                    attributes_json=json.dumps(entity.attributes, sort_keys=True),
-                )
-                for entity in states
-            )
+            home_assistant.replace_entity_cache(db, states)
         if site_data:
             site_row = db.get(Setting, SITE_SETTING)
             if site_row:
@@ -90,7 +81,7 @@ def run(stop_event: threading.Event, *, refresh_at_start: bool = True) -> None:
 
     while not stop_event.is_set():
         now = time.monotonic()
-        if now - last_ha_refresh >= 120:
+        if now - last_ha_refresh >= HA_REFRESH_SECONDS:
             last_ha_refresh = now
             refresh_home_assistant()
         run_playback_cycle()

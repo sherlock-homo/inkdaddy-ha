@@ -4,6 +4,7 @@ import hashlib
 import json
 import threading
 from datetime import datetime, timedelta, timezone
+from pathlib import Path
 from uuid import uuid4
 
 import pytest
@@ -15,7 +16,10 @@ from inkdaddy_hub.api import matter_frames
 from inkdaddy_hub.config import HubSettings
 from inkdaddy_hub.database import Base, SessionLocal
 from inkdaddy_hub.main import app
-from inkdaddy_hub.models import Device, DeviceStatusHistory, MatterFrameBinding, MatterPlaybackIntent, Playback
+from inkdaddy_hub.models import (
+    Device, DeviceStatusHistory, Frame, MatterFrameBinding, MatterPlaybackIntent, MatterFrameTransfer,
+    Playback, PlaybackOffer,
+)
 from inkdaddy_hub.services import ha_matter_share, matter_delivery, matter_frame_broker, playback
 from inkdaddy_hub.services.matter_controller import MatterControllerError
 from inkdaddy_hub.services.matter_delivery import (
@@ -223,6 +227,39 @@ def test_current_and_battery_follow_only_the_exact_display_receipt(linked_displa
     assert controller.radio_receipts == []
 
 
+@pytest.mark.parametrize("operation", ["frame", "playback"])
+def test_transport_backoff_starts_after_the_exchange_finishes(linked_display, monkeypatch, operation):
+    device_id, controller = linked_display
+    node = controller.identity["node_id"]
+    clock = [0.0]
+    calls = []
+
+    def slow_timeout(*_args):
+        calls.append(clock[0])
+        clock[0] += 24
+        raise MatterControllerError("Synthetic timeout.")
+
+    monkeypatch.setattr(matter_delivery, "monotonic", lambda: clock[0])
+    if operation == "frame":
+        run = deliver_frame
+        monkeypatch.setattr(controller, "send", slow_timeout)
+    else:
+        run = mirror_playback
+        monkeypatch.setattr(controller, "set_playback", slow_timeout)
+        with SessionLocal() as db:
+            matter_delivery.queue_playback_mirror(db, device_id, False)
+            db.commit()
+
+    attempt = run(controller, device_id, node, None)
+    assert attempt.next_attempt == 29
+    clock[0] = 28
+    assert run(controller, device_id, node, attempt) is attempt
+    clock[0] = 29
+    attempt = run(controller, device_id, node, attempt)
+    assert calls == [0, 29]
+    assert attempt.next_attempt == 63
+
+
 def test_missing_event_uses_a_bounded_radio_receipt_check(linked_display):
     device_id, controller = linked_display
     node = controller.identity["node_id"]
@@ -238,6 +275,77 @@ def test_missing_event_uses_a_bounded_radio_receipt_check(linked_display):
     controller.state = "displayed"
     assert deliver_frame(controller, device_id, node, attempt, now=deadline + 5) is None
     assert len(controller.radio_receipts) == 1
+
+
+@pytest.mark.parametrize("repairable", [True, False])
+def test_only_frame_sends_read_and_verify_payload(delivery_clock, monkeypatch, tmp_path, repairable):
+    engine = create_engine(f"sqlite:///{tmp_path / 'delivery.db'}")
+    Base.metadata.create_all(engine)
+    sessions = sessionmaker(bind=engine, autoflush=False)
+    monkeypatch.setattr(matter_delivery, "SessionLocal", sessions)
+    monkeypatch.setattr(playback, "get_settings", lambda: HubSettings(data_dir=tmp_path))
+    uid, node = "xiao-mg24-abcdef01", "123"
+    controller = ControllerStub({"device_uid": uid, "node_id": node})
+    with sessions() as db:
+        assert matter_frames._bind(db, controller.identity)["linked"]
+        device_id = db.scalar(select(Device.id).where(Device.device_uid == uid))
+        assert device_id is not None
+
+    reads = []
+    read = matter_frame_broker.read_frame_bytes
+    send = controller.send
+
+    def read_asset(frame):
+        reads.append(frame.frame_id)
+        return read(frame)
+
+    def timeout_first_send(*args):
+        result = send(*args)
+        if len(controller.sent) == 1:
+            raise MatterControllerError("Synthetic timeout.")
+        return result
+
+    monkeypatch.setattr(matter_frame_broker, "read_frame_bytes", read_asset)
+    monkeypatch.setattr(controller, "send", timeout_first_send)
+    attempt = deliver_frame(controller, device_id, node, None, now=0)
+    assert attempt is not None and not attempt.submitted
+    assert len(reads) == 1
+    with sessions() as db:
+        transfer = db.get(MatterFrameTransfer, device_id)
+        offer = db.get(PlaybackOffer, transfer.playback_offer_id)
+        frame = db.scalar(select(Frame).where(Frame.frame_id == offer.frame_id))
+        path = Path(frame.path)
+        prior_payload = path.read_bytes()
+        if not repairable:
+            # A file with the wrong full SHA cannot be sent or regenerated at a foreign path.
+            wrong_path = tmp_path / "unmanaged.raw"
+            wrong_path.write_bytes(bytes([prior_payload[0] ^ 1]) + prior_payload[1:])
+            frame.path = str(wrong_path)
+            db.commit()
+    path.unlink()
+
+    assert deliver_frame(controller, device_id, node, attempt, now=3) is attempt
+    assert len(reads) == 1
+    if not repairable:
+        with pytest.raises(matter_frame_broker.MatterFrameError, match="repair"):
+            deliver_frame(controller, device_id, node, attempt, now=5)
+        assert controller.sent == [(node, attempt.transfer_id)]
+        assert not path.exists()
+        return
+
+    attempt = deliver_frame(controller, device_id, node, attempt, now=5)
+    assert attempt is not None and attempt.submitted
+    assert controller.sent == [(node, attempt.transfer_id)] * 2
+    assert path.read_bytes() == prior_payload
+    assert len(reads) == 3  # One read per send plus verification after repair.
+    path.unlink()
+    attempt = deliver_frame(controller, device_id, node, attempt, now=10)
+    assert attempt is not None and attempt.submitted and len(reads) == 3
+    controller.state = "displayed"
+    assert deliver_frame(controller, device_id, node, attempt, now=15) is None
+    assert deliver_frame(controller, device_id, node, None, now=18) is None
+    assert len(reads) == 3
+    assert not path.exists()
 
 
 def test_a_cached_unknown_does_not_resend_until_the_device_confirms_unknown(linked_display):

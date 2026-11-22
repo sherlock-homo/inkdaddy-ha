@@ -1,4 +1,5 @@
 import asyncio
+from datetime import datetime, timedelta, timezone
 from functools import partial
 from unittest.mock import patch
 
@@ -157,4 +158,69 @@ def test_home_assistant_site_refresh_does_not_discard_cached_states(monkeypatch)
     with sessions() as db:
         assert db.get(HAEntityCache, "weather.home").state == "sunny"
         assert "America/New_York" in db.get(Setting, SITE_SETTING).value_json
+    engine.dispose()
+
+
+def test_dashboard_entity_catalog_is_cache_only_and_filters_for_fresh_measurements(monkeypatch):
+    from inkdaddy_hub.api import home_assistant as api
+    from inkdaddy_hub.models import HAEntityCache
+    from inkdaddy_hub.services.home_assistant import normalize_state_response, replace_entity_cache
+
+    engine = create_engine("sqlite://")
+    Base.metadata.create_all(engine)
+    now = datetime.now(timezone.utc)
+
+    def state(entity_id, value, minutes, **attributes):
+        return {
+            "entity_id": entity_id, "state": value, "attributes": attributes,
+            "last_reported": (now - timedelta(minutes=minutes)).isoformat(),
+            "last_updated": (now - timedelta(days=10)).isoformat(),
+        }
+
+    def no_network(*_args):
+        raise AssertionError("Dashboard catalog must use the existing cache.")
+
+    monkeypatch.setattr(api, "get_connection", no_network)
+    with Session(engine) as db:
+        replace_entity_cache(db, normalize_state_response([
+            state("sensor.a_stale", "15", 65, device_class="temperature"),
+            state("sensor.b_diagnostic", "15", 5, device_class="signal_strength", unit_of_measurement="W"),
+            state("sensor.c_unknown", "unknown", 7, device_class="temperature"),
+            state("sensor.d_unbounded", "inf", 3, device_class="temperature"),
+            state("sensor.e_temperature", "18", 24, device_class="temperature", token="fixture-only"),
+            state("weather.home", "sunny", 25, temperature=float("inf"), temperature_unit="°C"),
+            state("switch.fan", "off", 5),
+            state("input_text.example", "fixture-only", 4),
+            state("sensor.textual", "fixture-only", 3, device_class="temperature"),
+        ]))
+        db.commit()
+        matched = api.entities(db=db, purpose="dashboard", limit=1)
+        assert [entity["entity_id"] for entity in matched["entities"]] == ["sensor.e_temperature"]
+        assert matched["cached"]
+        assert matched["entities"][0]["source_reported_at"] == (now - timedelta(minutes=24)).isoformat()
+        assert "fixture-only" not in db.get(HAEntityCache, "sensor.e_temperature").attributes_json
+        assert db.get(HAEntityCache, "input_text.example") is None
+        assert db.get(HAEntityCache, "sensor.textual").state is None
+        weather = api.entities(db=db, domain="weather", purpose="dashboard", limit=2)
+        assert [entity["entity_id"] for entity in weather["entities"]] == ["weather.home"]
+        assert "temperature" not in weather["entities"][0]["attributes"]
+        assert api.entities(db=db, domain="switch", purpose="dashboard", limit=2)["entities"] == []
+    engine.dispose()
+
+
+def test_entity_cache_schema_migrates_existing_rows_idempotently(monkeypatch):
+    from sqlalchemy import inspect
+
+    from inkdaddy_hub import database
+
+    engine = create_engine("sqlite://")
+    with engine.begin() as connection:
+        connection.exec_driver_sql("CREATE TABLE ha_entity_cache (entity_id VARCHAR PRIMARY KEY)")
+        connection.exec_driver_sql("INSERT INTO ha_entity_cache VALUES ('weather.test')")
+    monkeypatch.setattr(database, "engine", engine)
+    database.init_db()
+    database.init_db()
+    assert [column["name"] for column in inspect(engine).get_columns("ha_entity_cache")].count("source_reported_at") == 1
+    with engine.connect() as connection:
+        assert connection.exec_driver_sql("SELECT * FROM ha_entity_cache").one() == ("weather.test", None)
     engine.dispose()

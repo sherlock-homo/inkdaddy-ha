@@ -1,4 +1,5 @@
 import hashlib
+import json
 import re
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timedelta, timezone
@@ -13,13 +14,23 @@ from sqlalchemy.orm import Session
 from inkdaddy_hub.api import devices as devices_api
 from inkdaddy_hub.config import HubSettings
 from inkdaddy_hub.database import Base
-from inkdaddy_hub.models import Dashboard, Device, DeviceStatusHistory, Frame, HAEntityCache, Photo
+from inkdaddy_hub.models import (
+    Dashboard,
+    Device,
+    DeviceStatusHistory,
+    Frame,
+    HAEntityCache,
+    Photo,
+    PlaybackSlot,
+)
+from inkdaddy_hub.services import playback
 from inkdaddy_hub.services.dashboard_content import dashboard_config, resolve_widget_text
 from inkdaddy_hub.services.matter_frame_broker import (
     MatterFrameError,
     prepare_matter_frame,
     record_matter_frame_receipt,
 )
+from inkdaddy_hub.services.palette import raw_frame_from_image, raw_photo_frame
 from inkdaddy_hub.services.playback import (
     acknowledge_frame,
     apply_playback_action,
@@ -183,6 +194,7 @@ def test_existing_hour_stays_stable_after_ha_state_changes(catalog):
         entity_id="weather.forecast_home",
         domain="weather",
         state="sunny",
+        source_reported_at=NOW.replace(tzinfo=None),
         attributes_json='{"temperature": 71, "temperature_unit": "°F"}',
     )
     db.add(weather)
@@ -197,7 +209,7 @@ def test_existing_hour_stays_stable_after_ha_state_changes(catalog):
         refresh_playback_slots(db, device, now=NOW + timedelta(hours=1)).frame_id != record.frame_id
     )
     device.battery_percent = 0
-    widgets = resolve_widget_text(db, dashboard_config(None), NOW, device)
+    widgets = resolve_widget_text(db, dashboard_config(None), NOW, device, observed_at=NOW)
     assert widgets[1].value == "Partly cloudy"
     assert widgets[1].detail == "71 °F"
     assert widgets[3].value == "0%"
@@ -213,14 +225,18 @@ def test_sample_weather_uses_first_available_provider(catalog):
             entity_id="weather.d_local",
             domain="weather",
             state="partlycloudy",
+            source_reported_at=NOW.replace(tzinfo=None),
             attributes_json='{"temperature": 71, "temperature_unit": "°F"}',
         ),
         HAEntityCache(entity_id="weather.e_other", domain="weather", state="sunny"),
     ])
     db.flush()
     config = dashboard_config(None)
-    weather = resolve_widget_text(db, config, NOW, device)[1]
+    clock, weather, *_ = resolve_widget_text(db, config, NOW + timedelta(hours=4), device, observed_at=NOW)
     assert (weather.value, weather.detail) == ("Partly cloudy", "71 °F")
+    assert clock.detail.startswith("For ")
+    assert clock.value == "20:45"
+    assert resolve_widget_text(db, config, NOW, device, observed_at=NOW + timedelta(minutes=61))[1].value == "Unavailable"
 
     config["widgets"][1]["source"]["entity_id"] = "weather.a_unavailable"
     assert resolve_widget_text(db, config, NOW, device)[1].value == "Unavailable"
@@ -452,13 +468,65 @@ def test_matter_delivery_repairs_generated_file_without_changing_offer(catalog, 
     )
 
 
+def test_preupgrade_photo_offer_repairs_and_only_unoffered_slots_get_new_dither(catalog):
+    db, device, photo = catalog
+    source = playback.Source("photo", str(photo.id))
+    update_playlist(db, device, [{"type": source.type, "id": source.id}], NOW)
+    photo_path = Path(photo.processed_path)
+    with Image.open(photo_path) as image:
+        old_raw, old_digest = raw_frame_from_image(image, dither=True)
+        new_raw, new_digest = raw_photo_frame(image)
+        assert new_digest != old_digest
+        frame = playback._store_frame(db, old_raw, image, source)
+    legacy_version = (
+        source.type, source.id, photo.original_filename, photo.checksum, photo_path.stat().st_mtime_ns
+    )
+    legacy_key = hashlib.sha256(
+        json.dumps(legacy_version, sort_keys=True, default=str).encode()
+    ).hexdigest()
+    hour = int(NOW.timestamp()) // 3600
+    for scheduled_hour in (hour, hour + 1):
+        db.add(PlaybackSlot(
+            device_id=device.id,
+            hour=scheduled_hour,
+            source_type=source.type,
+            source_id=source.id,
+            title=photo.original_filename,
+            frame_id=frame.frame_id,
+            render_key=legacy_key,
+        ))
+    db.flush()
+    offer_slot(db, db.get(PlaybackSlot, (device.id, hour)), now=NOW)
+    db.flush()
+    initial = prepare_matter_frame(db, device.device_uid, now=NOW)
+    assert initial.sha256 == old_digest
+    db.commit()
+    path = Path(frame.path)
+    path.unlink()
+
+    scheduled = refresh_playback_slots(db, device, now=NOW)
+    assert scheduled.frame_id == initial.frame_id
+    recovered = prepare_matter_frame(db, device.device_uid, now=NOW, repair_cache=True)
+    assert recovered == initial
+    assert path.read_bytes() == old_raw
+    upcoming = db.get(PlaybackSlot, (device.id, hour + 1))
+    assert upcoming.render_key != legacy_key
+    assert upcoming.frame_id == new_digest[:24]
+    upgraded_frame = db.scalar(select(Frame).where(Frame.frame_id == upcoming.frame_id))
+    assert upgraded_frame is not None
+    assert playback.read_frame_bytes(upgraded_frame) == new_raw
+
+
 def test_matter_delivery_keeps_confirmed_offer_when_source_no_longer_matches(catalog):
     db, device, _photo = catalog
     initial = prepare_matter_frame(db, device.device_uid, now=NOW)
     assert record_matter_frame_receipt(
         db, device.device_uid, transfer_id=initial.transfer_id, frame_id=initial.frame_id, result="ok"
     )
-    db.add(HAEntityCache(entity_id="weather.home", domain="weather", state="sunny"))
+    db.add(HAEntityCache(
+        entity_id="weather.home", domain="weather", state="sunny",
+        source_reported_at=datetime.now(timezone.utc).replace(tzinfo=None),
+    ))
     db.commit()
     current = playback_status(db, device, NOW)["current"]
     path = Path(db.scalar(select(Frame.path).where(Frame.frame_id == initial.frame_id)))

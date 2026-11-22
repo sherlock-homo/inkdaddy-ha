@@ -1,22 +1,25 @@
 import { useEffect, useRef, useState } from "react";
 import { EpaperPreview } from "../components/EpaperPreview";
 import { apiFetch, apiJson, apiPath } from "../lib/api";
-import type { DashboardConfig, DashboardRecord, DashboardWidget, DeviceRecord, HAEntity } from "../lib/types";
-
-const widgetKinds = [
-  ["home_assistant", "Home Assistant entity"],
-  ["clock", "Time"],
-  ["location", "Home location"],
-  ["weather", "Local weather"],
-  ["device_battery", "Display battery"],
-  ["text", "Text note"]
-] as const;
-
-type WidgetKind = typeof widgetKinds[number][0];
-type Tile = { x: number; y: number };
-const tiles: Tile[] = Array.from({ length: 8 }, (_, index) => ({ x: index % 4, y: Math.floor(index / 4) }));
+import type { DashboardConfig, DashboardRecord, DashboardWidget, DeviceRecord } from "../lib/types";
+import {
+  createWidget, dashboardPresets, displayText, presetWidgets, tiles, WidgetGallery, WidgetSettings, WidgetSymbol, widgetAt, widgetKind,
+  widgetKinds, widgetTitle, type Tile, type WidgetKind
+} from "./DashboardWidgets";
+import "./dashboards.css";
 
 const emptyConfig: DashboardConfig = { name: "", grid: { cols: 4, rows: 2 }, widgets: [] };
+
+function dashboardError(reason: unknown, fallback: string) {
+  if (!(reason instanceof Error)) return fallback;
+  try {
+    const detail = JSON.parse(reason.message)?.detail;
+    if (typeof detail === "string") return detail;
+  } catch {
+    return reason.message;
+  }
+  return reason.message;
+}
 
 export function DashboardsPage() {
   const [items, setItems] = useState<DashboardRecord[]>([]);
@@ -29,6 +32,8 @@ export function DashboardsPage() {
   const [message, setMessage] = useState("");
   const [importing, setImporting] = useState(false);
   const importInput = useRef<HTMLInputElement>(null);
+  const editorHeading = useRef<HTMLHeadingElement>(null);
+  const newButton = useRef<HTMLButtonElement>(null);
 
   useEffect(() => {
     const controller = new AbortController();
@@ -52,6 +57,13 @@ export function DashboardsPage() {
     setDirty(false);
     setActive(dashboard);
     setEditing(true);
+    window.requestAnimationFrame(() => editorHeading.current?.focus());
+  };
+
+  const close = () => {
+    setEditing(false);
+    setDirty(false);
+    window.requestAnimationFrame(() => newButton.current?.focus());
   };
 
   const saved = (dashboard: DashboardRecord) => {
@@ -59,6 +71,7 @@ export function DashboardsPage() {
       ? previous.map((item) => item.id === dashboard.id ? dashboard : item) : [...previous, dashboard]);
     setActive(dashboard);
     setMessage(`${dashboard.name} saved.`);
+    if (!active) window.requestAnimationFrame(() => editorHeading.current?.focus());
   };
 
   const importDashboard = async (file: File) => {
@@ -68,20 +81,11 @@ export function DashboardsPage() {
     try {
       const yaml = await file.text();
       if (!yaml.trim()) throw new Error("The dashboard file is empty.");
-      const response = await apiFetch("/api/dashboards/import", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ yaml })
-      });
-      if (!response.ok) {
-        const payload = await response.json().catch(() => null);
-        throw new Error(typeof payload?.detail === "string" ? payload.detail : "Unable to import dashboard.");
-      }
-      const dashboard: DashboardRecord = await response.json();
+      const dashboard = await apiJson<DashboardRecord>("/api/dashboards/import", { method: "POST", body: JSON.stringify({ yaml }) });
       setItems((previous) => [...previous, dashboard]);
       setMessage(`${dashboard.name} imported.`);
     } catch (reason) {
-      setError(reason instanceof Error ? reason.message : "Unable to import dashboard.");
+      setError(dashboardError(reason, "Unable to import dashboard."));
     } finally {
       setImporting(false);
     }
@@ -91,53 +95,51 @@ export function DashboardsPage() {
     await apiJson(`/api/dashboards/${encodeURIComponent(dashboard.id)}`, { method: "DELETE" });
     setItems((previous) => previous.filter((item) => item.id !== dashboard.id));
     setActive(null);
-    setEditing(false);
-    setDirty(false);
+    close();
     setMessage(`${dashboard.name} deleted.`);
   };
 
-  return (
-    <div className="page-grid">
-      <header className="page-header">
-        <div><h1>Dashboards</h1><p>Build panels with live Home Assistant entities and add them to your display playlist.</p></div>
-        <div className="form-row">
-          <button className="secondary-button" disabled={!ready || importing} onClick={() => importInput.current?.click()}>
-            {importing ? "Importing…" : "Import YAML"}
-          </button>
-          <input ref={importInput} type="file" accept=".yaml,.yml,application/yaml,application/x-yaml" hidden onChange={(event) => {
-            const file = event.currentTarget.files?.[0];
-            event.currentTarget.value = "";
-            if (file) void importDashboard(file);
-          }} />
-          <button className="primary-button" onClick={() => open(null)} disabled={editing && !active}>New dashboard</button>
-        </div>
-      </header>
-      {error && <p className="warning-text" role="alert">{error}</p>}
-      {message && <p className="preview-message" role="status">{message}</p>}
-      <div className="dashboard-layout">
-        <section className="workflow-panel dashboard-library" aria-label="Saved dashboards">
-          <h2>Saved dashboards</h2>
-          {items.map((item) => (
-            <button key={item.id} className="dashboard-library-item" aria-pressed={editing && active?.id === item.id}
-              onClick={() => open(item)} disabled={editing && active?.id === item.id}>
-              <strong>{item.name}</strong>
-              <span>{item.id === "sample" ? "Included dashboard" : `${item.config.widgets.length} widgets`}</span>
-            </button>
-          ))}
-          {!items.length && !error && <p className="muted-text">{ready ? "No dashboards yet." : "Loading dashboards…"}</p>}
-        </section>
-        {editing ? <DashboardEditor key={active?.id ?? "new"} dashboard={active} devices={devices} onSave={saved}
-          onDelete={remove} onDirty={setDirty} onClose={() => { setEditing(false); setDirty(false); }} /> : (
-          <section className="empty-state compact"><div><h2>Choose a dashboard</h2><p>Open a saved dashboard or create one for your display.</p></div></section>
-        )}
+  return <div className="page-grid dd-page">
+    <header className="page-header">
+      <div><h1>Dashboards</h1><p>Build a screen with live Home Assistant data.</p></div>
+      <div className="form-row">
+        <button className="secondary-button" disabled={!ready || importing} onClick={() => importInput.current?.click()}>
+          {importing ? "Importing…" : "Import YAML"}
+        </button>
+        <input ref={importInput} type="file" accept=".yaml,.yml,application/yaml,application/x-yaml" hidden onChange={(event) => {
+          const file = event.currentTarget.files?.[0];
+          event.currentTarget.value = "";
+          if (file) void importDashboard(file);
+        }} />
+        <button ref={newButton} className="primary-button" onClick={() => open(null)} disabled={editing && !active}>New dashboard</button>
       </div>
+    </header>
+    {error && <p className="warning-text" role="alert">{error}</p>}
+    {message && <p className="preview-message" role="status">{message}</p>}
+    <div className="dd-workspace" data-editing={editing}>
+      <section className="dd-library workflow-panel" aria-label="Saved dashboards">
+        <h2>Saved dashboards</h2>
+        <div className="dd-library-items">{items.map((item) => <button key={item.id} className="dd-library-item"
+          aria-pressed={editing && active?.id === item.id} onClick={() => open(item)} disabled={editing && active?.id === item.id}>
+          <span className="dd-library-mark" aria-hidden="true"><i /><i /><i /></span>
+          <span><strong>{item.name}</strong><small>{item.id === "sample" ? "Included dashboard" : `${item.config.widgets.length} widgets`}</small></span>
+        </button>)}</div>
+        {!items.length && !error && <p className="dd-hint">{ready ? "No dashboards yet." : "Loading dashboards…"}</p>}
+      </section>
+      {editing ? <DashboardEditor key={active?.id ?? "new"} dashboard={active} devices={devices} heading={editorHeading} onSave={saved}
+        onDelete={remove} onDirty={setDirty} onClose={close} /> : <section className="dd-empty workflow-panel">
+        <h2>What’s on your display?</h2>
+        <p>Open a saved dashboard or start with a layout you can make your own.</p>
+        <button className="secondary-button" onClick={() => open(null)}>Create a dashboard</button>
+      </section>}
     </div>
-  );
+  </div>;
 }
 
-function DashboardEditor({ dashboard, devices, onSave, onDelete, onDirty, onClose }: {
+function DashboardEditor({ dashboard, devices, heading, onSave, onDelete, onDirty, onClose }: {
   dashboard: DashboardRecord | null;
   devices: DeviceRecord[];
+  heading: React.RefObject<HTMLHeadingElement | null>;
   onSave: (record: DashboardRecord) => void;
   onDelete: (record: DashboardRecord) => Promise<void>;
   onDirty: (dirty: boolean) => void;
@@ -147,50 +149,61 @@ function DashboardEditor({ dashboard, devices, onSave, onDelete, onDirty, onClos
   const [draft, setDraft] = useState<DashboardConfig>(savedConfig);
   const [tile, setTile] = useState<Tile>(tiles[0]);
   const [previewUrl, setPreviewUrl] = useState<string | null>(null);
-  const [deviceUid, setDeviceUid] = useState("");
+  const [chosenDevice, setChosenDevice] = useState<string>();
   const [busy, setBusy] = useState<"save" | "preview" | "delete" | null>(null);
   const [error, setError] = useState("");
   const previewPanel = useRef<HTMLDivElement>(null);
   const previewRequest = useRef<AbortController | null>(null);
+  const inspector = useRef<HTMLHeadingElement>(null);
   const widget = widgetAt(draft.widgets, tile);
+  const kind = widget && widgetKind(widget);
+  const vacant = tiles.find((position) => !widgetAt(draft.widgets, position));
+  const occupied = draft.widgets.reduce((sum, item) => sum + item.w * item.h, 0);
   const dirty = JSON.stringify(draft) !== JSON.stringify(savedConfig);
-  const firstBlockedColumn = widget ? tiles.find((position) => position.y === widget.y && position.x > widget.x &&
-    draft.widgets.some((item) => item !== widget && widgetAt([item], position)))?.x : undefined;
-  const maxWidth = widget ? (firstBlockedColumn ?? 4) - widget.x : 0;
+  const deviceUid = chosenDevice ?? (devices.length === 1 ? devices[0].device_uid : "");
 
   useEffect(() => onDirty(dirty), [dirty, onDirty]);
-
   useEffect(() => {
     if (!previewUrl) return;
-    previewPanel.current?.focus({ preventScroll: true });
-    previewPanel.current?.scrollIntoView({ block: "nearest" });
+    previewPanel.current?.focus();
     return () => URL.revokeObjectURL(previewUrl);
   }, [previewUrl]);
-
   useEffect(() => () => previewRequest.current?.abort(), []);
 
   const change = (config: DashboardConfig) => {
     setDraft(config);
     setPreviewUrl(null);
+    setError("");
   };
 
-  const setWidget = (next: DashboardWidget | null) => {
-    const widgets = draft.widgets.filter((item) => item !== widget);
-    change({ ...draft, widgets: next ? [...widgets, next] : widgets });
+  const focusInspector = () => window.requestAnimationFrame(() => inspector.current?.focus());
+
+  const selectTile = (position: Tile) => {
+    setTile(position);
+    focusInspector();
   };
 
-  const setKind = (kind: WidgetKind) => {
-    const editingTile = widget ?? tile;
-    const widgetType = kind === "text" ? "text_note" : "entity_state";
-    const base = { id: widget?.id ?? `tile-${tile.x}-${tile.y}`, x: editingTile.x, y: editingTile.y };
-    setWidget({ ...base, type: widgetType, w: 1, h: 1,
-      options: { label: widgetKinds.find(([id]) => id === kind)?.[1] },
-      source: kind === "text" ? {} : { type: kind } });
+  const updateWidget = (next: DashboardWidget) => {
+    const widgets = draft.widgets.map((item) => item === widget ? next : item);
+    change({ ...draft, widgets });
+    if (next.x !== tile.x || next.y !== tile.y) setTile({ x: next.x, y: next.y });
+  };
+
+  const addWidget = (kind: WidgetKind) => {
+    change({ ...draft, widgets: [...draft.widgets, createWidget(kind, tile, draft.widgets)] });
+    focusInspector();
+  };
+
+  const removeWidget = () => {
+    change({ ...draft, widgets: draft.widgets.filter((item) => item !== widget) });
+    focusInspector();
   };
 
   const configPayload = () => JSON.stringify({ yaml: JSON.stringify({ ...draft, name: draft.name.trim() }), device_uid: deviceUid || undefined });
 
-  const save = async () => {
+  const save = async (event: React.FormEvent) => {
+    event.preventDefault();
+    if (busy || !draft.name.trim()) return;
     setBusy("save");
     setError("");
     try {
@@ -199,7 +212,7 @@ function DashboardEditor({ dashboard, devices, onSave, onDelete, onDirty, onClos
       setDraft({ ...saved.config, name: saved.name });
       onSave(saved);
     } catch (reason) {
-      setError(reason instanceof Error ? reason.message : "Unable to save dashboard.");
+      setError(dashboardError(reason, "Unable to save dashboard."));
     } finally {
       setBusy(null);
     }
@@ -235,185 +248,90 @@ function DashboardEditor({ dashboard, devices, onSave, onDelete, onDirty, onClos
     try {
       await onDelete(dashboard);
     } catch (reason) {
-      setError(reason instanceof Error ? reason.message : "Unable to delete dashboard.");
+      setError(dashboardError(reason, "Unable to delete dashboard."));
       setBusy(null);
     }
   };
 
-  return (
-    <div className="side-stack">
-      <section className="workflow-panel form-stack">
-        <div className="preview-toolbar">
-          <h2>{dashboard ? "Edit dashboard" : "New dashboard"}</h2>
-          <button className="secondary-button" disabled={Boolean(busy)} onClick={() => {
-            if (!dirty || window.confirm("Discard unsaved dashboard changes?")) onClose();
-          }}>Close editor</button>
-        </div>
-        <label>
-          Dashboard name
-          <input value={draft.name} maxLength={100} disabled={Boolean(busy)} onChange={(event) => change({ ...draft, name: event.target.value })} />
+  return <div className="dd-editor-stack">
+    <form className="dd-editor" onSubmit={(event) => void save(event)}>
+      <header className="dd-editor-top">
+        <h2 ref={heading} tabIndex={-1}>{dashboard ? "Edit dashboard" : "New dashboard"}</h2>
+        <button type="button" className="dd-close" disabled={Boolean(busy)} onClick={() => {
+          if (!dirty || window.confirm("Discard unsaved dashboard changes?")) onClose();
+        }}>Close editor</button>
+      </header>
+      <div className="dd-editor-body">
+        <label className="dd-name">Dashboard name
+          <input value={draft.name} maxLength={100} disabled={Boolean(busy)} placeholder="e.g. Kitchen display"
+            onChange={(event) => change({ ...draft, name: event.target.value })} />
         </label>
-        <div className="dashboard-tiles" aria-label="Dashboard tile layout">
-          {tiles.map((position) => {
-            const item = widgetAt(draft.widgets, position);
-            if (item && (item.x !== position.x || item.y !== position.y)) return null;
-            return <button className="dashboard-tile" key={`${position.x}:${position.y}`}
-              style={{ gridColumn: `${position.x + 1} / span ${item?.w ?? 1}`, gridRow: `${position.y + 1} / span ${item?.h ?? 1}` }}
-              aria-pressed={position.x === tile.x && position.y === tile.y}
-              aria-label={`Row ${position.y + 1}, column ${position.x + 1}: ${item ? widgetTitle(item) : "Empty tile"}`}
-              onClick={() => setTile(position)} disabled={Boolean(busy)}>
-              <span>{item ? widgetTitle(item) : "Add widget"}</span>
-            </button>;
-          })}
+        {!dashboard && !draft.widgets.length && <section className="dd-presets" aria-label="Dashboard presets">
+          <h3>Start with a layout</h3>
+          <div>{Object.entries(dashboardPresets).map(([id, preset]) => <button key={id} type="button" disabled={Boolean(busy)} onClick={() => {
+            change({ ...draft, name: draft.name || preset.name, widgets: presetWidgets(preset) });
+            setTile(tiles[0]);
+            focusInspector();
+          }}><span className="dd-preset-diagram" data-preset={id} aria-hidden="true"><i /><i /><i /><i /></span>
+            <span><strong>{preset.name}</strong><small>{preset.detail}</small></span></button>)}</div>
+        </section>}
+        <div className="dd-builder">
+          <section className="dd-layout" aria-labelledby="dd-layout-title">
+            <div className="dd-section-heading">
+              <div><h3 id="dd-layout-title">Layout</h3><p>{occupied} of 8 tiles used</p></div>
+              <button type="button" className="secondary-button dd-add-widget" disabled={Boolean(busy) || !vacant}
+                onClick={() => { if (vacant) selectTile(vacant); }}>Add widget</button>
+            </div>
+            <div className="dd-canvas" aria-label="Dashboard tile layout">
+              {tiles.map((position) => {
+                const item = widgetAt(draft.widgets, position);
+                if (item && (item.x !== position.x || item.y !== position.y)) return null;
+                const kind = item ? widgetKind(item) : undefined;
+                const note = kind === "text" ? displayText(item?.options?.text) : "";
+                return <button type="button" className="dd-tile" key={`${position.x}:${position.y}`} data-filled={Boolean(item)} data-kind={kind}
+                  style={{ gridColumn: `${position.x + 1} / span ${item?.w ?? 1}`, gridRow: `${position.y + 1} / span ${item?.h ?? 1}` }}
+                  aria-pressed={position.x === tile.x && position.y === tile.y} disabled={Boolean(busy)}
+                  aria-label={`${item ? widgetTitle(item) : "Add widget"}, row ${position.y + 1}, column ${position.x + 1}`}
+                  onClick={() => selectTile(position)}>
+                  {item ? <><WidgetSymbol kind={kind} /><strong>{widgetTitle(item)}</strong>{note && <small>{note}</small>}</> :
+                    <span className="dd-empty-tile" aria-hidden="true">+</span>}
+                </button>;
+              })}
+            </div>
+          </section>
+          <section className="dd-inspector" aria-labelledby="dd-inspector-title">
+            <div className="dd-section-heading">
+              <div><h3 tabIndex={-1} ref={inspector} id="dd-inspector-title">{widget ? "Edit widget" : "Choose a widget"}</h3>
+                <p>{widget ? (kind ? widgetKinds[kind].name : widget.type.replaceAll("_", " ")) :
+                  `Row ${tile.y + 1}, column ${tile.x + 1}`}</p></div>
+            </div>
+            {widget ? <WidgetSettings key={widget.id} widget={widget} widgets={draft.widgets} disabled={Boolean(busy)} onChange={updateWidget}
+              onRemove={removeWidget} /> : <WidgetGallery disabled={Boolean(busy)} onAdd={addWidget} />}
+          </section>
         </div>
-        <WidgetFields key={`${tile.x}:${tile.y}:${widget?.id ?? "empty"}`} widget={widget} maxWidth={maxWidth}
-          onKind={setKind} onChange={setWidget} disabled={Boolean(busy)} />
-        <div className="dashboard-editor-actions">
-          {devices.length > 0 && (
-            <label>
-              Preview for
-              <select value={deviceUid} disabled={Boolean(busy)} onChange={(event) => { setDeviceUid(event.target.value); setPreviewUrl(null); }}>
-                <option value="">Any display</option>
-                {devices.map((device) => <option key={device.device_uid} value={device.device_uid}>{device.name}</option>)}
-              </select>
-            </label>
-          )}
-          {dashboard && <a className="secondary-link" href={apiPath(`/api/dashboards/${encodeURIComponent(dashboard.id)}/export`)}
-            download={`${dashboard.id}.yaml`}>Download saved YAML</a>}
-          <button className="secondary-button" disabled={Boolean(busy)} onClick={() => void preview()}>{busy === "preview" ? "Rendering…" : "Preview"}</button>
-          <button className="primary-button" disabled={Boolean(busy) || !draft.name.trim()} onClick={() => void save()}>{busy === "save" ? "Saving…" : "Save dashboard"}</button>
-        </div>
+        <footer className="dd-editor-footer">
+          <div className="dd-preview-actions">
+            {devices.length > 0 && <label>Preview for<select value={deviceUid} disabled={Boolean(busy)} onChange={(event) => {
+              setChosenDevice(event.target.value); setPreviewUrl(null);
+            }}><option value="">Any display</option>
+              {devices.map((device) => <option key={device.device_uid} value={device.device_uid}>{device.name}</option>)}
+            </select></label>}
+            <button type="button" className="secondary-button" disabled={Boolean(busy) || !draft.widgets.length} onClick={() => void preview()}>{busy === "preview" ? "Rendering…" : "Preview"}</button>
+          </div>
+          <button type="submit" className="primary-button" disabled={Boolean(busy) || !draft.name.trim()}>{busy === "save" ? "Saving…" : "Save dashboard"}</button>
+        </footer>
         {error && <p className="warning-text" role="alert">{error}</p>}
-        {dashboard && dashboard.id !== "sample" && (
-          <button className="danger-text-button" disabled={Boolean(busy)} onClick={() => void remove()}>Delete dashboard</button>
-        )}
-      </section>
-      {previewUrl && <div ref={previewPanel} tabIndex={-1} className="dashboard-preview">
-        <EpaperPreview title="Dashboard preview" caption={draft.name || "Untitled dashboard"} previewUrl={previewUrl} empty="Preview unavailable." />
-      </div>}
-    </div>
-  );
-}
-
-function WidgetFields({ widget, maxWidth, onKind, onChange, disabled }: {
-  widget?: DashboardWidget;
-  maxWidth: number;
-  onKind: (kind: WidgetKind) => void;
-  onChange: (widget: DashboardWidget | null) => void;
-  disabled: boolean;
-}) {
-  const kind = editorWidgetKind(widget);
-  const knownKind = widgetKinds.some(([id]) => id === kind);
-  const widths = (widget?.type === "text_note" ? [1, 2, 4] : [1, 2]).filter((width) => width <= maxWidth);
-  return (
-    <div className="dashboard-widget-fields form-stack">
-      <label>
-        Widget
-        <select value={kind} onChange={(event) => onKind(event.target.value as WidgetKind)} disabled={disabled}>
-          {!knownKind && <option value={kind}>{widget ? widget.type.replaceAll("_", " ") : "Choose a widget"}</option>}
-          {widgetKinds.map(([id, label]) => <option value={id} key={id}>{label}</option>)}
-        </select>
-      </label>
-      {widget && (
-        <>
-          <label>
-            Label
-            <input value={widget.options?.label ?? ""} maxLength={80} disabled={disabled}
-              onChange={(event) => onChange({ ...widget, options: { ...widget.options, label: event.target.value } })} />
-          </label>
-          {kind === "text" && <label>
-            Text
-            <input value={widget.options?.text ?? ""} maxLength={120} disabled={disabled}
-              onChange={(event) => onChange({ ...widget, options: { ...widget.options, text: event.target.value } })} />
-          </label>}
-          {widget.h === 1 && widths.length > 1 && ["entity_state", "text_note"].includes(widget.type) && <label>
-            Width
-            <select value={widget.w} disabled={disabled} onChange={(event) => onChange({ ...widget, w: Number(event.target.value) })}>
-              {widths.map((width) => <option value={width} key={width}>{width === 1 ? "1 tile" : `${width} tiles`}</option>)}
-            </select>
-          </label>}
-          {(kind === "home_assistant" || kind === "weather") && (
-            <EntityPicker key={kind} weather={kind === "weather"} selected={widget.source?.entity_id ?? ""} disabled={disabled}
-              onChange={(entityId) => onChange({ ...widget, source: { ...widget.source, entity_id: entityId || undefined } })} />
-          )}
-          <button className="secondary-button dashboard-remove-widget" disabled={disabled} onClick={() => onChange(null)}>Remove widget</button>
-        </>
-      )}
-    </div>
-  );
-}
-
-function EntityPicker({ weather, selected, disabled, onChange }: {
-  weather: boolean;
-  selected: string;
-  disabled: boolean;
-  onChange: (id: string) => void;
-}) {
-  const [query, setQuery] = useState("");
-  const [entities, setEntities] = useState<HAEntity[]>([]);
-  const [error, setError] = useState("");
-  const [loading, setLoading] = useState(true);
-
-  useEffect(() => {
-    const controller = new AbortController();
-    const timer = window.setTimeout(async () => {
-      const parameters = new URLSearchParams({ search: query.trim(), limit: "60" });
-      if (weather) parameters.set("domain", "weather");
-      try {
-        const result = await apiJson<{ entities: HAEntity[]; error?: string | null }>(`/api/home-assistant/entities?${parameters}`, { signal: controller.signal });
-        if (controller.signal.aborted) return;
-        setEntities(result.entities);
-        setError(result.error ?? "");
-      } catch (reason) {
-        if (!controller.signal.aborted) setError(reason instanceof Error ? reason.message : "Unable to load entities.");
-      } finally {
-        if (!controller.signal.aborted) setLoading(false);
-      }
-    }, 200);
-    return () => {
-      window.clearTimeout(timer);
-      controller.abort();
-    };
-  }, [query, weather]);
-
-  return (
-    <div className="form-stack entity-picker">
-      <div className="entity-search">
-        <label>
-          Search Home Assistant entities
-          <input type="search" value={query} placeholder={weather ? "Weather provider" : "Name or entity ID"} disabled={disabled}
-            onChange={(event) => { setLoading(true); setQuery(event.target.value); }} />
-        </label>
-        {!weather && <button className="secondary-button" disabled={disabled} onClick={() => { if (query !== "battery") setLoading(true); setQuery("battery"); }}>Find batteries</button>}
+        {dashboard && <div className="dd-secondary-actions">
+          <a className="secondary-link" href={apiPath(`/api/dashboards/${encodeURIComponent(dashboard.id)}/export`)} download={`${dashboard.id}.yaml`}>Download saved YAML</a>
+          {dashboard.id !== "sample" && <button type="button" className="danger-text-button" disabled={Boolean(busy)} onClick={() => void remove()}>Delete dashboard</button>}
+        </div>}
       </div>
-      <label>
-        {weather ? "Weather entity" : "Home Assistant entity"}
-        <select value={selected} disabled={disabled || loading} onChange={(event) => onChange(event.target.value)}>
-          <option value="">{weather ? "Use the first available weather provider" : "Choose an entity"}</option>
-          {selected && !entities.some((entity) => entity.entity_id === selected) && <option value={selected}>{selected}</option>}
-          {entities.map((entity) => <option key={entity.entity_id} value={entity.entity_id}>
-            {entity.name && entity.name !== entity.entity_id ? `${entity.name} · ${entity.entity_id}` : entity.entity_id}
-          </option>)}
-        </select>
-      </label>
-      {error ? <p className="warning-text" role="alert">{error}</p> : !loading && !entities.length && (
-        <p className="muted-text">{query.trim() ? "No entities match your search." : "No entities available. Refresh the cache on the Home Assistant page."}</p>
-      )}
-    </div>
-  );
-}
-
-function widgetAt(widgets: DashboardWidget[], { x, y }: Tile): DashboardWidget | undefined {
-  return widgets.find((widget) => x >= widget.x && x < widget.x + widget.w && y >= widget.y && y < widget.y + widget.h);
-}
-
-function editorWidgetKind(widget?: DashboardWidget): string {
-  const sourceKind = widget?.source?.type ?? "";
-  if (sourceKind !== "text" && widgetKinds.some(([kind]) => kind === sourceKind)) return sourceKind;
-  if (sourceKind === "entity" || widget?.source?.entity_id) return "home_assistant";
-  return widget?.type === "text_note" ? "text" : sourceKind;
-}
-
-function widgetTitle(widget: DashboardWidget): string {
-  return widget.options?.label || widget.source?.entity_id || widget.type.replaceAll("_", " ");
+    </form>
+    {previewUrl && <div ref={previewPanel} tabIndex={-1} className="dashboard-preview">
+      <EpaperPreview title="Dashboard preview" caption={devices.find((device) => device.device_uid === deviceUid)?.name || draft.name || "Untitled dashboard"}
+        previewUrl={previewUrl} empty="Preview unavailable.">
+        <button className="secondary-button" onClick={() => { setPreviewUrl(null); heading.current?.focus(); }}>Back to editor</button>
+      </EpaperPreview>
+    </div>}
+  </div>;
 }

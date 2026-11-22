@@ -33,7 +33,7 @@ from .dashboard_content import (
     render_dashboard,
     resolve_widget_text,
 )
-from .palette import WAVESHARE_7COLOR_6, raw_frame_from_image
+from .palette import PHOTO_DITHER_VERSION, WAVESHARE_7COLOR_6, raw_frame_from_image, raw_photo_frame
 from .photos import load_processed_photo
 from .rendering import build_frame_manifest
 
@@ -234,11 +234,11 @@ def refresh_playback_slots(
     current_hour = playback.anchor_hour if playback.paused else hour
     current = db.get(PlaybackSlot, (device.id, current_hour))
     if not current or not _slot_already_offered(db, current):
-        current = _prepare_slot(db, device, current_hour, sources[position % len(sources)])
+        current = _prepare_slot(db, device, current_hour, sources[position % len(sources)], observed_at=now)
     if upcoming:
         for offset in range(1, UPCOMING_SLOTS + 1):
             next_hour = hour + offset
-            _prepare_slot(db, device, next_hour, sources[(position + offset) % len(sources)])
+            _prepare_slot(db, device, next_hour, sources[(position + offset) % len(sources)], observed_at=now)
         preserve_current = PlaybackSlot.hour != current_hour
         skipped_hour = PlaybackSlot.hour <= hour
         skipped_future = PlaybackSlot.hour > hour + UPCOMING_SLOTS
@@ -261,7 +261,11 @@ def _slot_already_offered(db: Session, slot: PlaybackSlot) -> bool:
         .limit(1)
     )
     frame = db.scalar(select(Frame).where(Frame.frame_id == slot.frame_id)) if offered else None
-    return bool(frame and asset_stat(get_settings().data_dir, "frames", frame.path))
+    return frame is not None and (
+        asset_stat(get_settings().data_dir, "frames", frame.path) is not None
+        # Delivery can repair the asset using an active Matter offer's exact hash.
+        or _active_transfer_for_slot(db, slot) is not None
+    )
 
 
 def repair_playback_frame(db: Session, device: Device, slot: PlaybackSlot, frame: Frame) -> None:
@@ -284,25 +288,40 @@ def _prepare_slot(
     source: Source,
     *,
     repair_frame: Frame | None = None,
+    observed_at: datetime | None = None,
 ) -> PlaybackSlot:
     slot = db.get(PlaybackSlot, (device.id, hour))
     photo = _ready_photo(db, source.id) if source.type == "photo" else None
     data_dir = get_settings().data_dir
     photo_metadata = asset_stat(data_dir, "processed", photo.processed_path) if photo else None
+    use_photo_dither = False
+    version: tuple[object, ...]
     if photo and photo_metadata:
         title = photo.original_filename
         version = (source.type, source.id, title, photo.checksum, photo_metadata.st_mtime_ns)
+        # An existing offer can only be repaired from the algorithm that created it.
+        legacy_offer = (
+            repair_frame is not None and slot is not None and slot.render_key == _render_key(version)
+        )
+        use_photo_dither = not legacy_offer
+        if use_photo_dither:
+            version = (*version, PHOTO_DITHER_VERSION)
     else:
         source = Source("dashboard", source.id if source.type == "dashboard" else "sample")
         dashboard = get_dashboard_record(db, source.id)
         config = dashboard_config(dashboard)
-        widgets = resolve_widget_text(db, config, _hour_time(hour), device)
+        timestamp = _hour_time(hour)
+        widgets = resolve_widget_text(db, config, timestamp, device, observed_at=observed_at)
         title = dashboard.name if dashboard else str(config.get("name", "Home Overview"))
         version = (source.type, source.id, title, config, [asdict(widget) for widget in widgets])
+        if repair_frame is not None and slot is not None and slot.render_key != _render_key(version):
+            legacy_widgets = resolve_widget_text(db, config, timestamp, device, legacy=True)
+            legacy_version = (*version[:-1], [asdict(widget) for widget in legacy_widgets])
+            if slot.render_key == _render_key(legacy_version):
+                widgets = legacy_widgets
+                version = legacy_version
 
-    render_key = hashlib.sha256(
-        json.dumps(version, sort_keys=True, default=str).encode()
-    ).hexdigest()
+    render_key = _render_key(version)
     if repair_frame is not None:
         if slot is None or slot.render_key != render_key:
             raise ValueError("The original frame can no longer be regenerated from its source.")
@@ -318,7 +337,10 @@ def _prepare_slot(
             image = image.resize((800, 480), Image.Resampling.LANCZOS)
     else:
         image = render_dashboard(config, widgets)
-    raw, checksum = raw_frame_from_image(image, dither=True)
+    if use_photo_dither:
+        raw, checksum = raw_photo_frame(image)
+    else:
+        raw, checksum = raw_frame_from_image(image, dither=True)
     if repair_frame is not None:
         if checksum != repair_frame.sha256 or checksum[:24] != repair_frame.frame_id:
             raise ValueError("The regenerated frame does not match the original frame.")
@@ -336,6 +358,10 @@ def _prepare_slot(
     slot.render_key = render_key
     db.flush()
     return slot
+
+
+def _render_key(version: tuple[object, ...]) -> str:
+    return hashlib.sha256(json.dumps(version, sort_keys=True, default=str).encode()).hexdigest()
 
 
 def _generated_frame_path(frame_id: str) -> Path:

@@ -10,20 +10,20 @@ from starlette.concurrency import run_in_threadpool
 
 from ..database import get_db
 from ..models import Album, AlbumItem, Photo
-from ..services.playback import MAX_RAW_FRAME_BYTES
+from ..services.playback import MAX_RAW_FRAME_BYTES, begin_playback_write
 from ..services.photos import (
     MAX_BATCH_BYTES,
     MAX_UPLOAD_BYTES,
     PhotoProcessingError,
     album_detail,
     album_to_dict,
-    create_album as create_album_record,
     create_photo_from_bytes,
     delete_photo_record,
     photo_to_dict,
     read_photo_asset,
     set_album_items,
 )
+from .settings import photo_upload_mode
 
 router = APIRouter(prefix="/api", tags=["photos"])
 
@@ -52,6 +52,18 @@ async def _read_image(upload: UploadFile, size: int | None = None) -> bytes:
     return content
 
 
+def _upload_mode(db: Session, mode: str | None) -> str:
+    if mode is None:
+        return photo_upload_mode(db)
+    if mode not in ("fit", "fill", "crop"):
+        raise HTTPException(status_code=422, detail="Select Fit, Fill, or Center crop.")
+    return mode
+
+
+def _process_image(db: Session, *, filename: str, content: bytes, mode: str) -> dict[str, object]:
+    return photo_to_dict(create_photo_from_bytes(db, filename=filename, content=content, mode=mode))
+
+
 @router.get("/photos")
 def list_photos(db: Session = Depends(get_db)) -> dict[str, object]:
     photos = db.scalars(select(Photo).order_by(Photo.created_at.desc(), Photo.id.desc())).all()
@@ -61,25 +73,23 @@ def list_photos(db: Session = Depends(get_db)) -> dict[str, object]:
 @router.post("/photos")
 async def upload_photo(
     file: UploadFile = File(...),
-    mode: str = Form("fit"),
+    mode: str | None = Form(None),
     db: Session = Depends(get_db),
 ) -> dict[str, object]:
+    mode = await run_in_threadpool(_upload_mode, db, mode)
     try:
-        photo = create_photo_from_bytes(
-            db,
-            filename=file.filename or "upload.jpg",
-            content=await _read_image(file),
-            mode=mode,
+        return await run_in_threadpool(
+            _process_image, db, filename=file.filename or "upload.jpg",
+            content=await _read_image(file), mode=mode,
         )
     except PhotoProcessingError as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
-    return photo_to_dict(photo)
 
 
 @router.post("/photos/batch")
 async def batch_upload(
     files: list[UploadFile] = File(default=[]),
-    mode: str = Form("fit"),
+    mode: str | None = Form(None),
     db: Session = Depends(get_db),
 ) -> dict[str, object]:
     if len(files) > 50:
@@ -97,19 +107,18 @@ async def batch_upload(
             raise HTTPException(status_code=413, detail="Batch uploads are limited to 128 MB of images.")
         sizes.append(size)
 
+    mode = await run_in_threadpool(_upload_mode, db, mode)
     created: list[dict[str, object]] = []
     errors: list[dict[str, object]] = []
     for upload, size in zip(files, sizes, strict=True):
         try:
             if size is None:
                 raise PhotoProcessingError("Could not read the uploaded image.")
-            photo = create_photo_from_bytes(
-                db,
-                filename=upload.filename or "upload.jpg",
-                content=await _read_image(upload, size),
-                mode=mode,
+            record = await run_in_threadpool(
+                _process_image, db, filename=upload.filename or "upload.jpg",
+                content=await _read_image(upload, size), mode=mode,
             )
-            created.append(photo_to_dict(photo))
+            created.append(record)
         except PhotoProcessingError as exc:
             errors.append({"filename": upload.filename, "detail": str(exc)})
     return {"photos": created, "accepted": len(created), "errors": errors}
@@ -146,7 +155,7 @@ def update_photo(photo_id: int, payload: dict[str, object], db: Session = Depend
     if not photo:
         raise HTTPException(status_code=404, detail="Photo not found.")
     if "original_filename" in payload or "name" in payload:
-        photo.original_filename = str(payload.get("original_filename") or payload.get("name") or photo.original_filename)
+        photo.original_filename = _name(payload.get("original_filename", payload.get("name")), max_length=512)
     db.commit()
     db.refresh(photo)
     return photo_to_dict(photo)
@@ -190,9 +199,16 @@ def list_albums(db: Session = Depends(get_db)) -> dict[str, object]:
 
 @router.post("/albums")
 def create_album(payload: dict[str, object], db: Session = Depends(get_db)) -> dict[str, object]:
-    album = create_album_record(db, name=str(payload.get("name") or "New album"), mode=str(payload.get("mode") or "ordered"))
-    if isinstance(payload.get("photo_ids"), list):
-        set_album_items(db, album, [int(value) for value in payload["photo_ids"]])
+    begin_playback_write(db)
+    photo_ids = _album_photo_ids(db, payload["photo_ids"]) if "photo_ids" in payload else []
+    mode = payload.get("mode", "ordered")
+    album = Album(
+        name=_name(payload.get("name", "New album")),
+        mode=mode if mode in ("ordered", "shuffle", "random") else "ordered",
+    )
+    db.add(album)
+    db.flush()
+    set_album_items(db, album, photo_ids)
     return album_detail(db, album)
 
 
@@ -206,19 +222,48 @@ def get_album(album_id: int, db: Session = Depends(get_db)) -> dict[str, object]
 
 @router.put("/albums/{album_id}")
 def update_album(album_id: int, payload: dict[str, object], db: Session = Depends(get_db)) -> dict[str, object]:
+    begin_playback_write(db)
     album = db.get(Album, album_id)
     if not album:
         raise HTTPException(status_code=404, detail="Album not found.")
     if "name" in payload:
-        album.name = str(payload["name"]).strip() or album.name
+        album.name = _name(payload["name"])
     if "mode" in payload:
-        mode = str(payload["mode"])
-        album.mode = mode if mode in {"ordered", "shuffle", "random"} else album.mode
-    if isinstance(payload.get("photo_ids"), list):
-        set_album_items(db, album, [int(value) for value in payload["photo_ids"]])
-    db.commit()
-    db.refresh(album)
+        mode = payload["mode"]
+        album.mode = mode if mode in ("ordered", "shuffle", "random") else album.mode
+    if "photo_ids" in payload:
+        set_album_items(db, album, _album_photo_ids(db, payload["photo_ids"]))
+    else:
+        db.commit()
     return album_detail(db, album)
+
+
+def _name(value: object, max_length: int = 255) -> str:
+    if not isinstance(value, str) or not (name := value.strip()) or len(name) > max_length:
+        raise HTTPException(status_code=422, detail=f"Enter a name between 1 and {max_length} characters.")
+    return name
+
+
+def _album_photo_ids(db: Session, values: object) -> list[int]:
+    if not isinstance(values, list):
+        raise HTTPException(status_code=422, detail="Choose an ordered list of photos.")
+    try:
+        photo_ids = list(dict.fromkeys(_photo_id(value) for value in values))
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail="Choose valid photo IDs.") from exc
+    if photo_ids:
+        found = set(db.scalars(select(Photo.id).where(Photo.id.in_(photo_ids))))
+        if found != set(photo_ids):
+            raise HTTPException(status_code=409, detail="A selected photo is no longer available.")
+    return photo_ids
+
+
+def _photo_id(value: object) -> int:
+    if type(value) is int or isinstance(value, str) and value.isascii() and value.isdigit():
+        photo_id = int(value)
+        if 0 < photo_id <= 2**63 - 1:
+            return photo_id
+    raise ValueError("Invalid photo ID.")
 
 
 @router.delete("/albums/{album_id}")

@@ -1,23 +1,30 @@
 from __future__ import annotations
 
 import json
-from datetime import datetime
+from datetime import datetime, timezone
 from hashlib import sha256
+from itertools import islice
+from typing import Literal
 
 from fastapi import APIRouter, Depends, HTTPException, Query
-from sqlalchemy import delete, func, select
+from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
 from ..database import get_db
 from ..models import HAEntityCache, HomeAssistantConfig
+from ..services.dashboard_sensors import DASHBOARD_DOMAINS, dashboard_eligible, entity_attributes
 from ..services.home_assistant import (
     HA_CONFIG_ID,
+    ENTITY_CACHE_DOMAINS,
+    cache_entity_attributes,
+    cache_entity_state,
     fetch_site,
     fetch_states,
     get_connection,
     home_assistant_origin,
     normalize_state_response,
     profile_token_url,
+    replace_entity_cache,
     supervisor_connection,
     validate_home_assistant_token,
 )
@@ -92,17 +99,17 @@ def _config_payload(db: Session, config: HomeAssistantConfig | None) -> dict[str
 
 
 def _entity_payload(entity: HAEntityCache) -> dict[str, object]:
-    try:
-        attributes = json.loads(entity.attributes_json)
-    except json.JSONDecodeError:
-        attributes = {}
     return {
         "entity_id": entity.entity_id,
         "domain": entity.domain,
         "name": entity.name,
         "device_id": entity.device_id,
-        "state": entity.state,
-        "attributes": attributes,
+        "state": cache_entity_state(entity.domain, entity.state),
+        "attributes": cache_entity_attributes(entity_attributes(entity)),
+        "source_reported_at": (
+            entity.source_reported_at.replace(tzinfo=timezone.utc).isoformat()
+            if entity.source_reported_at else None
+        ),
         "updated_at": entity.updated_at.isoformat() if entity.updated_at else None,
     }
 
@@ -176,36 +183,11 @@ def test_config(payload: dict[str, object], db: Session = Depends(get_db)) -> di
 def entities(
     search: str | None = None,
     domain: str | None = None,
-    refresh: bool = False,
     limit: int = Query(250, ge=1, le=1000),
     db: Session = Depends(get_db),
+    purpose: Literal["dashboard"] | None = None,
 ) -> dict[str, object]:
-    if supervisor_connection() and not refresh:
-        refresh = db.scalar(select(HAEntityCache.entity_id).limit(1)) is None
-    error: str | None = None
-    if refresh:
-        connection = get_connection(db)
-        if not connection:
-            raise HTTPException(status_code=409, detail="Home Assistant connection is unavailable.")
-        try:
-            states = fetch_states(connection.base_url, connection.token)
-        except (OSError, ValueError) as exc:
-            error = str(exc)
-        else:
-            db.execute(delete(HAEntityCache))
-            for item in states:
-                db.add(
-                    HAEntityCache(
-                        entity_id=item.entity_id,
-                        domain=item.domain,
-                        name=item.name,
-                        state=item.state,
-                        attributes_json=json.dumps(item.attributes, sort_keys=True),
-                    )
-                )
-            db.commit()
-
-    query = select(HAEntityCache)
+    query = select(HAEntityCache).where(HAEntityCache.domain.in_(ENTITY_CACHE_DOMAINS))
     if domain:
         query = query.where(HAEntityCache.domain == domain)
     if search:
@@ -213,23 +195,41 @@ def entities(
         query = query.where(
             func.lower(HAEntityCache.entity_id).like(like) | func.lower(HAEntityCache.name).like(like)
         )
-    query = query.order_by(HAEntityCache.domain, HAEntityCache.entity_id).limit(limit)
-    rows = db.scalars(query).all()
+    query = query.order_by(HAEntityCache.domain, HAEntityCache.entity_id)
+    if purpose == "dashboard":
+        query = query.where(HAEntityCache.domain.in_(DASHBOARD_DOMAINS)).execution_options(yield_per=100)
+        now = datetime.now(timezone.utc)
+        rows = islice((entity for entity in db.scalars(query) if dashboard_eligible(entity, now)), limit)
+    else:
+        rows = db.scalars(query.limit(limit))
     return {
         "entities": [_entity_payload(entity) for entity in rows],
-        "cached": not refresh or bool(error),
-        "error": error,
+        "cached": True,
+        "error": None,
     }
 
 
 @router.post("/entities/refresh")
 def refresh_entities(db: Session = Depends(get_db)) -> dict[str, object]:
-    return entities(refresh=True, limit=250, db=db)
+    connection = get_connection(db)
+    if not connection:
+        raise HTTPException(status_code=409, detail="Home Assistant connection is unavailable.")
+    try:
+        states = fetch_states(connection.base_url, connection.token)
+    except (OSError, ValueError):
+        return {**entities(db=db, limit=250), "error": "Home Assistant could not refresh the entity cache."}
+    replace_entity_cache(db, states)
+    db.commit()
+    return {**entities(db=db, limit=250), "cached": False}
 
 
 @router.get("/devices")
 def ha_devices(db: Session = Depends(get_db)) -> dict[str, object]:
-    rows = db.execute(select(HAEntityCache.domain, func.count()).group_by(HAEntityCache.domain)).all()
+    rows = db.execute(
+        select(HAEntityCache.domain, func.count())
+        .where(HAEntityCache.domain.in_(ENTITY_CACHE_DOMAINS))
+        .group_by(HAEntityCache.domain)
+    ).all()
     return {
         "devices": [],
         "domains": [{"domain": domain, "entity_count": count} for domain, count in rows],
@@ -246,21 +246,12 @@ def load_mock_entities(db: Session = Depends(get_db)) -> dict[str, object]:
             {
                 "entity_id": "sensor.living_room_temperature",
                 "state": "72",
-                "attributes": {"friendly_name": "Living Room Temperature", "unit_of_measurement": "F"},
+                "last_reported": datetime.now(timezone.utc).isoformat(),
+                "attributes": {"friendly_name": "Living Room Temperature", "unit_of_measurement": "°F"},
             },
             {"entity_id": "binary_sensor.front_door", "state": "off", "attributes": {"friendly_name": "Front Door"}},
         ]
     )
-    db.execute(delete(HAEntityCache))
-    for item in mock_entities:
-        db.add(
-            HAEntityCache(
-                entity_id=item.entity_id,
-                domain=item.domain,
-                name=item.name,
-                state=item.state,
-                attributes_json=json.dumps(item.attributes, sort_keys=True),
-            )
-        )
+    replace_entity_cache(db, mock_entities)
     db.commit()
     return {"entities": len(mock_entities), "mock": True}

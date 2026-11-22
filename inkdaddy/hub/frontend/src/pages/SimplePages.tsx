@@ -1,152 +1,181 @@
-import { useEffect, useState } from "react";
+import { useCallback, useEffect, useState } from "react";
 import { apiJson } from "../lib/api";
 
-const copy: Record<string, [string, string]> = {
-  photos: ["Manage Photos", "Upload, process, queue, shuffle, and publish ePaper-ready photo frames."],
-  dashboards: ["Dashboards", "Edit 2 x 4 tile layouts, bind widgets to Home Assistant, and preview output."],
-  devices: ["Devices", "Track battery, firmware, last refresh, mesh status, and selected display content."],
-  "home-assistant": ["Home Assistant", "Paste a long-lived access token, validate it, and cache entity metadata."],
-  settings: ["Settings", "Configure local auth, refresh intervals, data paths, and display defaults."],
-  updates: ["Updates", "Check GitHub Releases, back up before updating, and approve firmware releases."],
-  diagnostics: ["Diagnostics", "Inspect Thread reachability, service health, logs, and simulator state."]
+export type Framing = "fit" | "fill";
+type Settings = {
+  mode: "supervisor" | "standalone";
+  version: string;
+  photo_upload_mode: Framing;
+  scheduled_refresh_minutes: number;
+  target: { width: number; height: number };
 };
 
-export function SimplePage({ route }: { route: keyof typeof copy }) {
-  if (route === "updates") {
-    return <UpdatesPage />;
-  }
-  const [title, description] = copy[route];
-  return (
-    <div className="page-grid">
-      <header className="page-header">
-        <div>
-          <h1>{title}</h1>
-          <p>{description}</p>
-        </div>
-      </header>
-      <section className="empty-state">
-        <h2>{title} workspace</h2>
-        <p>This route is scaffolded for the Phase implementation behind the current API contract.</p>
-        <button className="secondary-button">Open settings</button>
-      </section>
-    </div>
-  );
+export function FramingOptions() {
+  return <><option value="fit">Fit whole photo</option><option value="fill">Fill display with a center crop</option></>;
 }
 
-type HubUpdateStatus = {
+export function SimplePage({ route }: { route: "settings" | "diagnostics" | "updates" }) {
+  if (route === "updates") return <UpdatesPage />;
+  if (route === "diagnostics") return <DiagnosticsPage />;
+  return <SettingsPage />;
+}
+
+function SettingsPage() {
+  const [settings, setSettings] = useState<Settings | null>(null);
+  const [mode, setMode] = useState<Framing>("fit");
+  const [busy, setBusy] = useState(false);
+  const [feedback, setFeedback] = useState("");
+  const load = useCallback(async () => {
+    setBusy(true);
+    setFeedback("");
+    try {
+      const saved = await apiJson<Settings>("/api/settings");
+      setSettings(saved);
+      setMode(saved.photo_upload_mode);
+    } catch {
+      setFeedback("Unable to load settings.");
+    } finally {
+      setBusy(false);
+    }
+  }, []);
+  useEffect(() => { void load(); }, [load]);
+
+  async function save() {
+    setBusy(true);
+    setFeedback("");
+    try {
+      const saved = await apiJson<Settings>("/api/settings", {
+        method: "PUT",
+        body: JSON.stringify({ photo_upload_mode: mode })
+      });
+      setSettings(saved);
+      setMode(saved.photo_upload_mode);
+      setFeedback("Photo framing saved.");
+    } catch {
+      setFeedback("Unable to save photo framing.");
+    } finally {
+      setBusy(false);
+    }
+  }
+  return <div className="page-grid">
+    <header className="page-header"><h1>Settings</h1></header>
+    <section className="workflow-panel form-stack">
+      {settings ? <>
+        <label>Default photo framing
+          <select value={mode} disabled={busy} onChange={(event) => setMode(event.target.value as Framing)}><FramingOptions /></select>
+        </label>
+        <div className="button-row">
+          <button className="primary-button" disabled={busy || mode === settings.photo_upload_mode} onClick={() => void save()}>Save setting</button>
+        </div>
+        <dl className="update-list">
+          <div><dt>Display size</dt><dd>{settings.target.width} × {settings.target.height}</dd></div>
+          <div><dt>Scheduled interval</dt><dd>{settings.scheduled_refresh_minutes} minutes</dd></div>
+        </dl>
+      </> : !busy && <div className="button-row"><button className="secondary-button" onClick={() => void load()}>Retry</button></div>}
+      <p role="status">{feedback || (busy ? "Working…" : "")}</p>
+    </section>
+  </div>;
+}
+
+type Diagnostics = {
+  app: string;
+  version: string;
+  mode: "supervisor" | "standalone";
+  matter_controller: "ready" | "not_configured" | "unavailable";
+  registered_displays: number;
+  matter_links: number;
+  ready_photos: number;
+  cached_entities: number;
+  last_displayed_at: string | null;
+};
+
+function DiagnosticsPage() {
+  const [report, setReport] = useState<Diagnostics | null>(null);
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState("");
+  const refresh = useCallback(async () => {
+    setBusy(true);
+    setError("");
+    try {
+      setReport(await apiJson<Diagnostics>("/api/diagnostics"));
+    } catch {
+      setError("Unable to load diagnostics.");
+    } finally {
+      setBusy(false);
+    }
+  }, []);
+  useEffect(() => { void refresh(); }, [refresh]);
+
+  return <div className="page-grid">
+    <header className="page-header">
+      <h1>Diagnostics</h1>
+      <button className="secondary-button" disabled={busy} onClick={() => void refresh()}>{busy ? "Checking…" : "Refresh diagnostics"}</button>
+    </header>
+    {error && <p role="alert">{error}</p>}
+    {report && <section className="update-panel">
+      <dl className="update-list">
+        <div><dt>App version</dt><dd>{report.version}</dd></div>
+        <div><dt>Installation</dt><dd>{report.mode === "supervisor" ? "Home Assistant app" : "Standalone"}</dd></div>
+        <div><dt>Matter frame service</dt><dd>{{ ready: "Ready", not_configured: "Not configured", unavailable: "Unavailable" }[report.matter_controller]}</dd></div>
+        <div><dt>Registered displays</dt><dd>{report.registered_displays}</dd></div>
+        <div><dt>Linked Matter displays</dt><dd>{report.matter_links}</dd></div>
+        <div><dt>Last confirmed refresh</dt><dd>{report.last_displayed_at ? new Date(report.last_displayed_at).toLocaleString() : "No confirmation yet"}</dd></div>
+        <div><dt>Ready photos</dt><dd>{report.ready_photos}</dd></div>
+        <div><dt>Cached Home Assistant entities</dt><dd>{report.cached_entities}</dd></div>
+      </dl>
+      {report.mode === "supervisor" && <div className="button-row">
+        <a className="secondary-link" href="/config/thread" target="_parent">Thread settings</a>
+        <a className="secondary-link" href="/config/logs" target="_parent">Home Assistant logs</a>
+      </div>}
+    </section>}
+  </div>;
+}
+
+type HubUpdate = {
   status: string;
   current_version: string;
-  latest_version: string | null;
-  update_available: boolean;
-  repository: string | null;
-  release_url?: string | null;
-  error?: string | null;
-};
-
-type AutoUpdateStatus = {
-  configured: boolean;
-  auto_apply: boolean;
-  apply_allowed: boolean;
-  check_interval_seconds: number;
-  command: string;
-};
-
-type FirmwareStatus = {
-  status: string;
-  board: string;
-  latest_version: string | null;
-  update_available: boolean;
-  sha256?: string | null;
-  error?: string | null;
+  latest_version?: string | null;
+  update_available?: boolean;
 };
 
 function UpdatesPage() {
-  const [hub, setHub] = useState<HubUpdateStatus | null>(null);
-  const [auto, setAuto] = useState<AutoUpdateStatus | null>(null);
-  const [firmware, setFirmware] = useState<FirmwareStatus | null>(null);
-  const [error, setError] = useState<string | null>(null);
-
-  useEffect(() => {
-    Promise.all([
-      apiJson<HubUpdateStatus>("/api/updates/hub/check"),
-      apiJson<AutoUpdateStatus>("/api/updates/hub/auto"),
-      apiJson<FirmwareStatus>("/api/updates/firmware/manifest?board=xiao_mg24")
-    ])
-      .then(([hubStatus, autoStatus, firmwareStatus]) => {
-        setHub(hubStatus);
-        setAuto(autoStatus);
-        setFirmware(firmwareStatus);
-      })
-      .catch((reason) => setError(reason instanceof Error ? reason.message : "Unable to load update status."));
+  const [update, setUpdate] = useState<HubUpdate | null>(null);
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState("");
+  const check = useCallback(async () => {
+    setBusy(true);
+    setError("");
+    try {
+      setUpdate(await apiJson<HubUpdate>("/api/updates/hub/check"));
+    } catch {
+      setError("Unable to check for updates.");
+    } finally {
+      setBusy(false);
+    }
   }, []);
+  useEffect(() => { void check(); }, [check]);
 
-  return (
-    <div className="page-grid">
-      <header className="page-header">
-        <div>
-          <h1>Updates</h1>
-          <p>Check GitHub Releases, back up before updating, and approve firmware releases.</p>
-        </div>
-      </header>
-      {error && <section className="empty-state"><p>{error}</p></section>}
-      <section className="update-grid">
-        <UpdatePanel
-          title="Hub"
-          status={hub?.status ?? "loading"}
-          rows={[
-            ["Current", hub?.current_version ?? "Loading"],
-            ["Latest", hub?.latest_version ?? "Not found"],
-            ["Repository", hub?.repository ?? "Not configured"],
-            ["Auto apply", auto ? (auto.auto_apply && auto.apply_allowed ? "Enabled" : "Disabled") : "Loading"],
-            ["Command", auto?.command ?? "Loading"]
-          ]}
-          detail={hub?.error ?? (hub?.update_available ? "A newer release is available." : "No hub update is pending.")}
-        />
-        <UpdatePanel
-          title="Firmware"
-          status={firmware?.status ?? "loading"}
-          rows={[
-            ["Board", firmware?.board ?? "xiao_mg24"],
-            ["Latest", firmware?.latest_version ?? "Not found"],
-            ["Checksum", firmware?.sha256 ? "Present" : "Missing"],
-            ["Delivery", "Hub mediated"]
-          ]}
-          detail={firmware?.error ?? "Devices pull this manifest after battery and hardware checks pass."}
-        />
+  const managed = update?.status === "managed_by_home_assistant";
+  return <div className="page-grid">
+    <header className="page-header"><h1>Updates</h1></header>
+    {error && <p role="alert">{error}</p>}
+    <div className="update-grid">
+      <section className="update-panel">
+        <h2>inkDaddy app</h2>
+        {update && <dl className="update-list">
+          <div><dt>Installed</dt><dd>{update.current_version}</dd></div>
+          {!managed && update.latest_version && <div><dt>Available release</dt><dd>{update.latest_version}</dd></div>}
+        </dl>}
+        {managed ? <a className="secondary-link" href="/hassio/dashboard" target="_parent">Manage app in Home Assistant</a> : <>
+          {update && <p>{update.update_available ? "A newer release is available." : update.status === "current" ? "Up to date." : update.status === "not_configured" ? "A release channel has not been configured." : "Release information is unavailable."}</p>}
+          <button className="secondary-button" disabled={busy} onClick={() => void check()}>{busy ? "Checking…" : "Check for updates"}</button>
+        </>}
+      </section>
+      <section className="update-panel">
+        <h2>Display firmware</h2>
+        <p>Your Matter controller handles firmware updates.</p>
+        {managed && <a className="secondary-link" href="/config/devices/dashboard" target="_parent">Open Home Assistant devices</a>}
       </section>
     </div>
-  );
-}
-
-function UpdatePanel({
-  title,
-  status,
-  rows,
-  detail
-}: {
-  title: string;
-  status: string;
-  rows: Array<[string, string]>;
-  detail: string;
-}) {
-  const tone = status === "current" ? "status-good" : status === "update_available" ? "status-warn" : "status-neutral";
-  return (
-    <section className="update-panel">
-      <div className="preview-toolbar">
-        <div>
-          <h2>{title}</h2>
-          <p>{detail}</p>
-        </div>
-        <span className={`status-badge ${tone}`}>{status}</span>
-      </div>
-      <dl className="update-list">
-        {rows.map(([label, value]) => (
-          <div key={label}>
-            <dt>{label}</dt>
-            <dd>{value}</dd>
-          </div>
-        ))}
-      </dl>
-    </section>
-  );
+  </div>;
 }

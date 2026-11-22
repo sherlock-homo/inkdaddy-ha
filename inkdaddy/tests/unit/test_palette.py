@@ -1,3 +1,4 @@
+import hashlib
 import unittest
 
 from PIL import Image
@@ -8,6 +9,7 @@ from inkdaddy_hub.services.palette import (
     palette_indices_to_panel_values,
     pack_indices,
     raw_frame_from_image,
+    raw_photo_frame,
     unpack_indices,
 )
 
@@ -28,3 +30,19 @@ class PaletteTests(unittest.TestCase):
         self.assertEqual(raw, bytes([0x01, 0x32]))
         self.assertEqual(len(raw), 2)
         self.assertEqual(len(digest), 64)
+
+    def test_photo_dither_packs_the_six_panel_codes_in_pixel_order(self):
+        image = Image.new("RGB", (6, 1))
+        image.putdata(WAVESHARE_7COLOR_6.colors)
+        raw, digest = raw_photo_frame(image)
+        self.assertEqual(raw, bytes([0x01, 0x65, 0x32]))
+        self.assertEqual(digest, hashlib.sha256(raw).hexdigest())
+
+    def test_photo_dither_preserves_midgray_in_linear_light(self):
+        image = Image.new("RGB", (800, 480), (128, 128, 128))
+        raw, _digest = raw_photo_frame(image)
+        self.assertEqual(len(raw), 192_000)
+        pigments = unpack_indices(raw, 800 * 480)
+        self.assertEqual(set(pigments), {0, 1})
+        # A half-scale sRGB input reflects about 21.6% of the nominal white.
+        self.assertAlmostEqual(pigments.count(1) / len(pigments), 0.216, delta=0.015)

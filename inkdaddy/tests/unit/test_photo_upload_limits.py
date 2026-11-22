@@ -15,6 +15,7 @@ from inkdaddy_hub.config import HubSettings
 from inkdaddy_hub.database import Base, get_db
 from inkdaddy_hub.models import Photo
 from inkdaddy_hub.services import photos
+from inkdaddy_hub.services.palette import raw_frame_from_image, raw_photo_frame
 
 
 def raster(format="PNG", *, size=(4, 3)):
@@ -92,6 +93,23 @@ def test_batch_keeps_an_allowed_photo_when_another_has_unsupported_content(photo
                for directory in ("originals", "processed", "previews", "frames"))
 
 
+def test_uploaded_photo_frame_uses_the_photo_renderer(photo_app):
+    client, _engine = photo_app
+    uploaded = client.post(
+        "/api/photos", files={"file": ("tone.png", raster(size=(800, 480)), "image/png")}
+    )
+    assert uploaded.status_code == 200
+    metadata = uploaded.json()
+    preview = client.get(metadata["preview_url"])
+    with Image.open(BytesIO(preview.content)) as image:
+        expected, digest = raw_photo_frame(image)
+        assert expected != raw_frame_from_image(image)[0]
+    downloaded = client.get(metadata["frame_url"])
+    assert downloaded.content == expected
+    assert len(downloaded.content) == 192_000
+    assert metadata["checksum"] == digest
+
+
 @pytest.mark.parametrize(("limit", "value"), [("MAX_IMAGE_PIXELS", 9), ("MAX_IMAGE_DIMENSION", 3)])
 def test_dimensions_are_checked_before_pixel_decode(photo_app, monkeypatch, tmp_path, limit, value):
     client, engine = photo_app
@@ -111,7 +129,7 @@ def test_dimensions_are_checked_before_pixel_decode(photo_app, monkeypatch, tmp_
 
 def test_batch_cleans_partial_files_keeps_successes_and_continues(photo_app, monkeypatch, tmp_path):
     client, engine = photo_app
-    pack = photos.raw_frame_from_image
+    pack = photos.raw_photo_frame
     calls = 0
 
     def pack_with_error(*args):
@@ -121,7 +139,7 @@ def test_batch_cleans_partial_files_keeps_successes_and_continues(photo_app, mon
             raise OSError("Synthetic storage failure.")
         return pack(*args)
 
-    monkeypatch.setattr(photos, "raw_frame_from_image", pack_with_error)
+    monkeypatch.setattr(photos, "raw_photo_frame", pack_with_error)
     image = raster()
     response = client.post(
         "/api/photos/batch",

@@ -84,6 +84,17 @@ def _bind(db: Session, matter_node: dict[str, object]) -> dict[str, object]:
 
 @router.get("")
 def matter_status(refresh: bool = False, db: Session = Depends(get_db)) -> dict[str, object]:
+    if refresh and supervisor_connection() is not None:
+        raise HTTPException(status_code=409, detail="Use Check connections to contact Matter displays.")
+    return _matter_status(db, refresh=refresh)
+
+
+@router.post("/check")
+def check_matter_status(db: Session = Depends(get_db)) -> dict[str, object]:
+    return _matter_status(db, refresh=True)
+
+
+def _matter_status(db: Session, *, refresh: bool) -> dict[str, object]:
     controller = get_controller()
     linked = dict(db.execute(select(MatterFrameBinding.node_id, Device.device_uid).join(Device)).tuples().all())
     if controller is None:
@@ -96,15 +107,16 @@ def matter_status(refresh: bool = False, db: Session = Depends(get_db)) -> dict[
             "available": False,
             "nodes": [{"node_id": target, "device_uid": uid, "linked": True} for target, uid in linked.items()],
         }
-    return {
-        "enabled": True,
-        "available": True,
-        "nodes": [
-            {"node_id": target, "device_uid": item.get("device_uid"), "linked": target in linked}
-            for item in node_list
-            if isinstance(target := item.get("node_id"), str)
-        ],
-    }
+    nodes = [
+        {"node_id": target, "device_uid": uid, "linked": True}
+        for target, uid in linked.items()
+    ]
+    nodes.extend(
+        {"node_id": target, "device_uid": item.get("device_uid"), "linked": False}
+        for item in node_list
+        if isinstance(target := item.get("node_id"), str) and target not in linked
+    )
+    return {"enabled": True, "available": True, "nodes": nodes}
 
 
 @router.post("/pair")

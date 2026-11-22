@@ -6,19 +6,30 @@ interface Choice extends PlaybackSource {
   title: string;
 }
 
-export function PlaylistEditor({ path, playlist, onSave }: {
+export function PlaylistEditor({ path, playlist, defaultSource, initialSource, onSave, onDirtyChange, onBusyChange }: {
   path: string;
   playlist: PlaybackSource[];
+  defaultSource: PlaybackSource;
+  initialSource: PlaybackSource | null;
   onSave: (state: Playback) => void;
+  onDirtyChange: (dirty: boolean) => void;
+  onBusyChange: (busy: boolean) => void;
 }) {
-  const [entries, setEntries] = useState(playlist);
+  const [original] = useState(playlist);
+  const [entries, setEntries] = useState(() => initialSource && playlist.length < 100
+    ? [...(playlist.length ? playlist : [defaultSource]), initialSource] : playlist);
   const [choices, setChoices] = useState<Choice[]>([]);
-  const [choiceKey, setChoiceKey] = useState("");
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
+  const [loadAttempt, setLoadAttempt] = useState(0);
+  const [loading, setLoading] = useState(true);
+  const dirty = entries.length !== original.length || entries.some((entry, index) => sourceKey(entry) !== sourceKey(original[index]));
+  useEffect(() => { onDirtyChange(dirty); }, [dirty, onDirtyChange]);
 
   useEffect(() => {
     const controller = new AbortController();
+    setLoading(true);
+    setError("");
     const options = { signal: controller.signal };
     Promise.all([
       apiJson<{ dashboards: DashboardRecord[] }>("/api/dashboards", options),
@@ -27,21 +38,23 @@ export function PlaylistEditor({ path, playlist, onSave }: {
     ]).then(([{ dashboards }, { photos }, { albums }]) => {
       if (controller.signal.aborted) return;
       setChoices([
+        ...(!dashboards.some((item) => item.id === "sample") ? [{ type: "dashboard" as const, id: "sample", title: "Sample dashboard" }] : []),
         ...dashboards.map((item) => ({ type: "dashboard" as const, id: item.id, title: item.name })),
-        ...albums.map((item) => ({ type: "album" as const, id: item.id, title: item.name })),
+        ...albums.filter((item) => item.item_count > 0).map((item) => ({ type: "album" as const, id: item.id, title: item.name })),
         ...photos.filter((item) => item.frame_url).map((item) => ({ type: "photo" as const, id: item.id, title: item.original_filename }))
       ]);
-    }).catch((reason: Error) => {
-      if (!controller.signal.aborted) setError(reason.message);
+    }).catch(() => {
+      if (!controller.signal.aborted) setError("Unable to load playlist choices.");
+    }).finally(() => {
+      if (!controller.signal.aborted) setLoading(false);
     });
     return () => controller.abort();
-  }, []);
+  }, [loadAttempt]);
 
-  const add = () => {
-    const choice = choices.find((item) => sourceKey(item) === choiceKey);
+  const add = (key: string) => {
+    const choice = choices.find((item) => sourceKey(item) === key);
     if (!choice) return;
     setEntries([...entries, { type: choice.type, id: choice.id }]);
-    setChoiceKey("");
   };
 
   const move = (index: number, offset: number) => {
@@ -53,14 +66,16 @@ export function PlaylistEditor({ path, playlist, onSave }: {
 
   const save = async () => {
     setBusy(true);
+    onBusyChange(true);
     setError("");
     try {
       const state = await apiJson<Playback>(path, { method: "PUT", body: JSON.stringify({ playlist: entries }) });
       onSave(state);
-    } catch (reason) {
-      setError(reason instanceof Error ? reason.message : "Unable to save playlist.");
+    } catch {
+      setError("Unable to save playlist. Check whether its items are still available.");
     } finally {
       setBusy(false);
+      onBusyChange(false);
     }
   };
 
@@ -86,15 +101,16 @@ export function PlaylistEditor({ path, playlist, onSave }: {
       )}
       <label>
         Add to playlist
-        <select value={choiceKey} disabled={busy} onChange={(event) => setChoiceKey(event.target.value)}>
-          <option value="">Choose a dashboard, album, or photo</option>
+        <select value="" disabled={busy || loading || !choices.length || entries.length >= 100} onChange={(event) => add(event.target.value)}>
+          <option value="">{loading ? "Loading choices…" : "Choose a dashboard, album, or photo"}</option>
           {choices.map((item) => <option value={sourceKey(item)} key={sourceKey(item)}>{item.title} ({item.type})</option>)}
         </select>
       </label>
       <div className="playlist-item-actions">
-        <button className="secondary-button" disabled={!choiceKey || busy} onClick={add}>Add</button>
-        <button className="primary-button" disabled={busy} onClick={() => void save()}>{busy ? "Saving…" : "Save playlist"}</button>
+        {!loading && !choices.length && <button className="secondary-button" disabled={busy} onClick={() => setLoadAttempt((attempt) => attempt + 1)}>Reload choices</button>}
+        <button className="primary-button" disabled={busy || !dirty} onClick={() => void save()}>{busy ? "Saving…" : "Save playlist"}</button>
       </div>
+      {entries.length >= 100 && <p>Playlists support up to 100 items.</p>}
       {error && <p className="warning-text" role="alert">{error}</p>}
     </div>
   );

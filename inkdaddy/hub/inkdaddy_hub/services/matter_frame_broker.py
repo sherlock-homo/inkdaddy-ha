@@ -16,6 +16,7 @@ from ..models import (
     MatterFrameTransfer,
     Playback,
     PlaybackOffer,
+    PlaybackSlot,
 )
 from .palette import WAVESHARE_7COLOR_6
 from .playback import (
@@ -44,7 +45,7 @@ class MatterFrameOffer:
     transfer_id: str
     frame_id: str
     sha256: str
-    payload: bytes
+    payload: bytes | None
     width: int
     height: int
     playing: bool
@@ -55,14 +56,20 @@ class MatterFrameOffer:
 
     @property
     def size_bytes(self) -> int:
-        return len(self.payload)
+        return FRAME_SIZE
 
 
 def prepare_matter_frame(
-    db: Session, device_uid: str, *, now: datetime | None = None, repair_cache: bool = False
+    db: Session,
+    device_uid: str,
+    *,
+    now: datetime | None = None,
+    repair_cache: bool = False,
+    include_payload: bool = True,
 ) -> MatterFrameOffer:
     """Prepare an exact offer for a known device after the caller verifies its Matter binding.
 
+    The delivery worker can defer the asset read until it needs to send bytes.
     Commit this transaction before sending the offer or its bytes to the controller.
     """
     begin_playback_write(db)
@@ -75,16 +82,8 @@ def prepare_matter_frame(
     frame = db.scalar(select(Frame).where(Frame.frame_id == slot.frame_id))
     if frame is None:
         raise MatterFrameError("The scheduled frame was not prepared.")
-    try:
-        data = _read_verified_bytes(frame)
-    except _FramePayloadError:
-        if not repair_cache:
-            raise
-        try:
-            repair_playback_frame(db, device, slot, frame)
-        except (OSError, ValueError) as exc:
-            raise MatterFrameError(f"Could not repair the prepared frame: {exc}") from exc
-        data = _read_verified_bytes(frame)
+    _validate_frame_metadata(frame)
+    data = _verified_payload(db, device, slot, frame, repair_cache=repair_cache) if include_payload else None
     active = db.get(MatterFrameTransfer, device.id)
     previous = db.get(PlaybackOffer, active.playback_offer_id) if active else None
     latest = _latest_offer_id(db, device.id)
@@ -133,6 +132,32 @@ def prepare_matter_frame(
         source_id=slot.source_id,
         scheduled_at=datetime.fromtimestamp(slot.hour * 3600, timezone.utc),
     )
+
+
+def load_matter_frame_payload(db: Session, device: Device, offer: MatterFrameOffer) -> bytes:
+    """Read the exact offered asset in the same write transaction that prepared it."""
+    hour = int(offer.scheduled_at.timestamp()) // 3600
+    slot = db.get(PlaybackSlot, (device.id, hour))
+    frame = db.scalar(select(Frame).where(Frame.frame_id == offer.frame_id))
+    if slot is None or slot.frame_id != offer.frame_id or frame is None or frame.sha256 != offer.sha256:
+        raise MatterFrameError("The prepared frame changed before delivery.")
+    _validate_frame_metadata(frame)
+    return _verified_payload(db, device, slot, frame, repair_cache=True)
+
+
+def _verified_payload(
+    db: Session, device: Device, slot: PlaybackSlot, frame: Frame, *, repair_cache: bool
+) -> bytes:
+    try:
+        return _read_verified_bytes(frame)
+    except _FramePayloadError:
+        if not repair_cache:
+            raise
+    try:
+        repair_playback_frame(db, device, slot, frame)
+    except (OSError, ValueError) as exc:
+        raise MatterFrameError(f"Could not repair the prepared frame: {exc}") from exc
+    return _read_verified_bytes(frame)
 
 
 def record_matter_frame_receipt(
@@ -200,7 +225,7 @@ def _latest_offer_id(db: Session, device_id: int) -> int | None:
     )
 
 
-def _read_verified_bytes(frame: Frame) -> bytes:
+def _validate_frame_metadata(frame: Frame) -> None:
     if (
         frame.width != FRAME_WIDTH
         or frame.height != FRAME_HEIGHT
@@ -211,6 +236,9 @@ def _read_verified_bytes(frame: Frame) -> bytes:
         or frame.byte_order != "row_major"
     ):
         raise MatterFrameError("The prepared frame does not match the Spectra 6 panel format.")
+
+
+def _read_verified_bytes(frame: Frame) -> bytes:
     data = read_frame_bytes(frame)
     if data is None:
         raise _FramePayloadError("Could not read the prepared frame.")

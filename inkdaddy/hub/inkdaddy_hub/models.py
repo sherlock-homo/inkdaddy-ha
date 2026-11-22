@@ -48,6 +48,7 @@ class HAEntityCache(Base, TimestampMixin):
     name: Mapped[str | None] = mapped_column(String(255))
     device_id: Mapped[str | None] = mapped_column(String(255))
     state: Mapped[str | None] = mapped_column(String(255))
+    source_reported_at: Mapped[datetime | None] = mapped_column(DateTime)
     attributes_json: Mapped[str] = mapped_column(Text, default="{}", nullable=False)
 
 

@@ -4,7 +4,7 @@ import hashlib
 from dataclasses import dataclass
 from typing import Iterable
 
-from PIL import Image
+from PIL import Image, ImageChops
 
 
 @dataclass(frozen=True)
@@ -31,6 +31,21 @@ WAVESHARE_7COLOR_6 = Palette(
 )
 
 PALETTES = {WAVESHARE_7COLOR_6.name: WAVESHARE_7COLOR_6}
+
+PHOTO_DITHER_VERSION = "linear-srgb-floyd-steinberg-v1"
+
+
+def _linear_srgb(value: int) -> int:
+    encoded = value / 255
+    linear = encoded / 12.92 if encoded <= 0.04045 else ((encoded + 0.055) / 1.055) ** 2.4
+    return round(255 * linear)
+
+
+_LINEAR_SRGB = tuple(_linear_srgb(value) for value in range(256))
+_MONOCHROME_TO_PANEL = (
+    bytes([WAVESHARE_7COLOR_6.packed_values[0]]) * 255
+    + bytes([WAVESHARE_7COLOR_6.packed_values[1]])
+)
 
 
 def get_palette(name: str) -> Palette:
@@ -126,20 +141,55 @@ def unpack_indices(data: bytes, pixel_count: int, bits_per_pixel: int = 4) -> li
 def raw_frame_from_image(
     image: Image.Image, palette: Palette = WAVESHARE_7COLOR_6, *, dither: bool = False
 ) -> tuple[bytes, str]:
+    values: list[int] | bytes
     if dither:
-        palette_image = Image.new("P", (1, 1))
-        colors = palette.colors + (palette.colors[-1],) * (256 - len(palette.colors))
-        palette_image.putpalette([channel for color in colors for channel in color])
-        indices = image.convert("RGB").quantize(palette=palette_image, dither=Image.Dither.FLOYDSTEINBERG)
-        translation = bytes(palette.packed_values) + bytes([palette.packed_values[-1]]) * (256 - len(palette.colors))
-        values = indices.tobytes().translate(translation)
+        values = _dither_to_panel_values(image.convert("RGB"), palette.colors, palette.packed_values)
     else:
         values = palette_indices_to_panel_values(image_to_palette_indices(image, palette), palette)
-    if palette.bits_per_pixel == 4:
-        low = list(values[1::2])
+    return _pack_frame(values, palette.bits_per_pixel)
+
+
+def raw_photo_frame(image: Image.Image) -> tuple[bytes, str]:
+    # Adjacent panel pixels average in light. Diffuse errors in linear sRGB so
+    # mixes preserve the brightness of midtones in the nominal panel palette.
+    palette = WAVESHARE_7COLOR_6
+    rgb_image = image.convert("RGB")
+    red, green, blue = rgb_image.split()
+    if not (ImageChops.difference(red, green).getbbox() or ImageChops.difference(green, blue).getbbox()):
+        # Use only black and white when the input is entirely monochrome.
+        grayscale = red.point(_LINEAR_SRGB).convert("1", dither=Image.Dither.FLOYDSTEINBERG)
+        values = grayscale.convert("L").tobytes().translate(_MONOCHROME_TO_PANEL)
+        return _pack_frame(values, palette.bits_per_pixel)
+
+    linear_image = rgb_image.point(_LINEAR_SRGB * 3)
+    linear_palette = tuple(
+        (_LINEAR_SRGB[red], _LINEAR_SRGB[green], _LINEAR_SRGB[blue])
+        for red, green, blue in palette.colors
+    )
+    values = _dither_to_panel_values(linear_image, linear_palette, palette.packed_values)
+    return _pack_frame(values, palette.bits_per_pixel)
+
+
+def _dither_to_panel_values(
+    rgb_image: Image.Image,
+    colors: tuple[tuple[int, int, int], ...],
+    panel_values: tuple[int, ...],
+) -> bytes:
+    palette_image = Image.new("P", (1, 1))
+    padding = 256 - len(colors)
+    swatches = colors + (colors[-1],) * padding
+    palette_image.putpalette([channel for color in swatches for channel in color])
+    indices = rgb_image.quantize(palette=palette_image, dither=Image.Dither.FLOYDSTEINBERG)
+    translation = bytes(panel_values) + bytes([panel_values[-1]]) * padding
+    return indices.tobytes().translate(translation)
+
+
+def _pack_frame(values: list[int] | bytes, bits_per_pixel: int) -> tuple[bytes, str]:
+    if bits_per_pixel == 4:
+        low = values[1::2]
         if len(values) % 2:
-            low.append(0)
+            low = [*low, 0]
         raw = bytes((first << 4) | second for first, second in zip(values[::2], low))
     else:
-        raw = pack_indices(values, palette.bits_per_pixel)
+        raw = pack_indices(values, bits_per_pixel)
     return raw, hashlib.sha256(raw).hexdigest()

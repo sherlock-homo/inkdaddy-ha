@@ -1,10 +1,15 @@
-import { useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useState } from "react";
 import { apiJson } from "../lib/api";
 import type { HAConfig, HAEntity } from "../lib/types";
 
 export function HomeAssistantPage() {
   const [config, setConfig] = useState<HAConfig | null>(null);
   const [entities, setEntities] = useState<HAEntity[]>([]);
+  const [domains, setDomains] = useState<string[]>([]);
+  const [resultsRevision, setResultsRevision] = useState(0);
+  const [loadingEntities, setLoadingEntities] = useState(true);
+  const [resultsError, setResultsError] = useState("");
+  const [configError, setConfigError] = useState("");
   const [baseUrl, setBaseUrl] = useState("http://homeassistant.local:8123");
   const [token, setToken] = useState("");
   const [search, setSearch] = useState("");
@@ -13,25 +18,54 @@ export function HomeAssistantPage() {
   const [busy, setBusy] = useState(false);
   const managed = config?.mode === "supervisor";
 
-  const load = async () => {
-    const [configPayload, entityPayload] = await Promise.all([
-      apiJson<HAConfig>("/api/home-assistant/config"),
-      apiJson<{ entities: HAEntity[] }>("/api/home-assistant/entities?limit=100")
-    ]);
-    setConfig(configPayload);
-    if (configPayload.mode !== "supervisor" && configPayload.base_url) setBaseUrl(configPayload.base_url);
-    setEntities(entityPayload.entities);
-  };
-
-  useEffect(() => {
-    load().catch((error: Error) => setMessage(error.message));
+  const loadConfig = useCallback(async (signal?: AbortSignal) => {
+    setConfigError("");
+    try {
+      const saved = await apiJson<HAConfig>("/api/home-assistant/config", { signal });
+      if (signal?.aborted) return;
+      setConfig(saved);
+      if (saved.mode !== "supervisor" && saved.base_url) setBaseUrl(saved.base_url);
+    } catch {
+      if (!signal?.aborted) setConfigError("Unable to load the Home Assistant connection.");
+    }
   }, []);
 
-  const domains = useMemo(() => Array.from(new Set(entities.map((entity) => entity.domain))).sort(), [entities]);
-  const filtered = entities.filter((entity) => {
-    const haystack = `${entity.entity_id} ${entity.name ?? ""} ${entity.state ?? ""}`.toLowerCase();
-    return (!domain || entity.domain === domain) && (!search || haystack.includes(search.toLowerCase()));
-  });
+  useEffect(() => {
+    const controller = new AbortController();
+    void loadConfig(controller.signal);
+    return () => controller.abort();
+  }, [loadConfig]);
+
+  useEffect(() => {
+    const controller = new AbortController();
+    apiJson<{ domains: Array<{ domain: string }> }>("/api/home-assistant/devices", { signal: controller.signal })
+      .then(({ domains }) => setDomains(domains.map((row) => row.domain).sort()))
+      .catch(() => {});
+    return () => controller.abort();
+  }, [resultsRevision]);
+
+  useEffect(() => {
+    const controller = new AbortController();
+    setLoadingEntities(true);
+    setResultsError("");
+    const timer = window.setTimeout(async () => {
+      const query = new URLSearchParams({ limit: "100" });
+      if (search.trim()) query.set("search", search.trim());
+      if (domain) query.set("domain", domain);
+      try {
+        const result = await apiJson<{ entities: HAEntity[] }>(`/api/home-assistant/entities?${query}`, { signal: controller.signal });
+        if (!controller.signal.aborted) setEntities(result.entities);
+      } catch {
+        if (!controller.signal.aborted) setResultsError("Unable to load cached entities.");
+      } finally {
+        if (!controller.signal.aborted) setLoadingEntities(false);
+      }
+    }, 250);
+    return () => {
+      window.clearTimeout(timer);
+      controller.abort();
+    };
+  }, [search, domain, resultsRevision]);
 
   const save = async () => {
     setBusy(true);
@@ -43,8 +77,9 @@ export function HomeAssistantPage() {
       setConfig(payload);
       setToken("");
       setMessage("Home Assistant configuration saved.");
-    } catch (error) {
-      setMessage(error instanceof Error ? error.message : "Unable to save Home Assistant config.");
+      setResultsRevision((revision) => revision + 1);
+    } catch {
+      setMessage("Unable to save the connection. Check the URL and access token.");
     } finally {
       setBusy(false);
     }
@@ -53,12 +88,16 @@ export function HomeAssistantPage() {
   const refresh = async () => {
     setBusy(true);
     try {
-      const payload = await apiJson<{ entities: HAEntity[]; error?: string | null }>("/api/home-assistant/entities?refresh=true&limit=500");
-      setEntities(payload.entities);
-      setMessage(payload.error ?? `Cached ${payload.entities.length} entities.`);
-      setConfig(await apiJson<HAConfig>("/api/home-assistant/config"));
-    } catch (error) {
-      setMessage(error instanceof Error ? error.message : "Unable to refresh entities.");
+      const payload = await apiJson<{ error?: string | null }>("/api/home-assistant/entities/refresh", { method: "POST" });
+      if (payload.error) {
+        setMessage("Home Assistant could not refresh the entity cache.");
+      } else {
+        setMessage("Home Assistant entities refreshed.");
+        setResultsRevision((revision) => revision + 1);
+        await loadConfig();
+      }
+    } catch {
+      setMessage("Unable to refresh Home Assistant entities.");
     } finally {
       setBusy(false);
     }
@@ -76,6 +115,9 @@ export function HomeAssistantPage() {
         </span>
       </header>
 
+      {configError && <div className="button-row"><p role="alert">{configError}</p>
+        <button className="secondary-button" onClick={() => void loadConfig()}>Retry connection check</button>
+      </div>}
       <section className="settings-grid">
         {managed ? (
           <section className="workflow-panel form-stack">
@@ -97,17 +139,14 @@ export function HomeAssistantPage() {
             </label>
             <label>
               Long-lived access token
-              <textarea
-                value={token}
+              <input type="password" value={token} autoComplete="off"
                 onChange={(event) => setToken(event.target.value)}
-                placeholder={config?.token_preview ? `Stored token ${config.token_preview}` : "Paste token"}
-                rows={4}
-              />
+                placeholder={config.configured ? "Stored token" : "Paste token"} />
             </label>
             <div className="button-row">
-              <a className="secondary-link" href={config?.token_page_url ?? `${baseUrl}/profile`} target="_blank" rel="noreferrer">
+              {config.token_page_url && <a className="secondary-link" href={config.token_page_url} target="_blank" rel="noreferrer">
                 Open token page
-              </a>
+              </a>}
               <button className="primary-button" disabled={busy} onClick={() => void save()}>
                 {busy ? "Working..." : "Save and validate"}
               </button>
@@ -117,7 +156,7 @@ export function HomeAssistantPage() {
             </div>
             {message && <p className="muted-text" role="status">{message}</p>}
           </div>
-        </div> : <p className="muted-text" role="status">{message || "Loading connection…"}</p>}
+        </div> : !configError && <p className="muted-text" role="status">Loading connection…</p>}
 
         <div className="info-panel vertical">
           <h2>Cache</h2>
@@ -151,7 +190,12 @@ export function HomeAssistantPage() {
       </section>
 
       <section className="table-panel">
-        {filtered.map((entity) => (
+        {resultsError && <div className="button-row"><p role="alert">{resultsError}</p>
+          <button className="secondary-button" onClick={() => setResultsRevision((revision) => revision + 1)}>Retry search</button>
+        </div>}
+        {loadingEntities && <p role="status">Searching cached entities…</p>}
+        {!loadingEntities && !resultsError && entities.length === 100 && <p className="muted-text">Showing 100 results. Narrow your search to see fewer.</p>}
+        {!loadingEntities && !resultsError && entities.map((entity) => (
           <div className="table-row" key={entity.entity_id}>
             <div>
               <strong>{entity.name ?? entity.entity_id}</strong>
@@ -161,10 +205,10 @@ export function HomeAssistantPage() {
             <strong>{entity.state ?? "unknown"}</strong>
           </div>
         ))}
-        {!filtered.length && (
+        {!loadingEntities && !resultsError && !entities.length && (
           <section className="empty-state compact">
-            <h2>{entities.length ? "No matching entities" : "No cached entities"}</h2>
-            <p>{entities.length ? "Try a different search." : managed ? "Refresh entities to make them available in dashboards." : "Save a token and refresh entities to bind dashboards to Home Assistant."}</p>
+            <h2>{search || domain ? "No matching entities" : "No cached entities"}</h2>
+            <p>{search || domain ? "Try a different search." : "Refresh entities to make them available in dashboards."}</p>
           </section>
         )}
       </section>

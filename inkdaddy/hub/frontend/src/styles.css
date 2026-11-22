@@ -251,6 +251,16 @@ button {
   gap: 18px;
 }
 
+@media (min-width: 921px) {
+  .photo-library .photo-actions {
+    grid-area: 1 / 2;
+  }
+
+  .photo-library .photo-cards {
+    grid-area: 1 / 1;
+  }
+}
+
 .preview-panel {
   padding: 18px;
 }
