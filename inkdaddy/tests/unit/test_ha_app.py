@@ -1,0 +1,160 @@
+import asyncio
+from functools import partial
+from unittest.mock import patch
+
+from fastapi import FastAPI, Request
+from fastapi.testclient import TestClient
+from sqlalchemy import create_engine
+from sqlalchemy.orm import Session
+
+from inkdaddy_hub.api.integrations import list_integrations
+from inkdaddy_hub.database import Base
+from inkdaddy_hub.ha_app import SUPERVISOR_IP, ingress_host, ingress_only, ingress_port
+from inkdaddy_hub.services.home_assistant import SUPERVISOR_CORE_URL, supervisor_connection
+
+
+def test_ingress_only_accepts_connections_from_supervisor():
+    async def request(peer, proxy_peer):
+        messages = []
+
+        async def send(message):
+            messages.append(message)
+
+        async def downstream(scope, receive, send):
+            await send({"type": "http.response.start", "status": 200, "headers": []})
+            await send({"type": "http.response.body", "body": b"ok"})
+
+        await ingress_only(downstream, {
+            "type": "http",
+            "client": (peer, 1111),
+            "headers": [(b"x-forwarded-for", proxy_peer.encode())],
+        }, None, send)
+        return messages[0]["status"]
+
+    assert asyncio.run(request(SUPERVISOR_IP, "192.0.2.15")) == 200
+    assert asyncio.run(request("192.0.2.15", SUPERVISOR_IP)) == 403
+
+
+def test_ingress_requires_marker_and_bounds_requests(monkeypatch):
+    from inkdaddy_hub import ha_app
+
+    monkeypatch.setattr(ha_app, "MIB", 32)
+    app = FastAPI()
+
+    @app.post("/api/test")
+    async def echo(request: Request):
+        return {"size": len(await request.body())}
+
+    client = TestClient(partial(ingress_only, app), client=(SUPERVISOR_IP, 1111))
+    assert client.post("/api/test", content="hello").status_code == 403
+    headers = {"X-InkDaddy-Request": "1"}
+    accepted = client.post("/api/test", headers=headers, content="hello")
+    assert accepted.json() == {"size": 5}
+    assert accepted.headers["cache-control"] == "no-store"
+    assert accepted.headers["x-content-type-options"] == "nosniff"
+    assert "frame-ancestors 'self'" in accepted.headers["content-security-policy"]
+    assert client.post("/api/test", headers={**headers, "Content-Length": "33"}, content="hello").status_code == 413
+    assert client.post("/api/test", headers=headers, content=iter([b"a" * 17, b"b" * 17])).status_code == 413
+
+
+def test_managed_app_does_not_expose_development_cors_or_openapi(monkeypatch):
+    from inkdaddy_hub.main import create_app
+
+    monkeypatch.setenv("INKDADDY_HA_MODE", "supervisor")
+    app = create_app()
+    client = TestClient(partial(ingress_only, app), client=(SUPERVISOR_IP, 1111))
+    response = client.options("/api/photos", headers={
+        "Origin": "http://localhost:5173",
+        "Access-Control-Request-Method": "POST",
+        "Access-Control-Request-Headers": "X-InkDaddy-Request",
+    })
+    assert "access-control-allow-origin" not in response.headers
+    assert app.openapi_url is None
+
+
+def test_supervisor_credentials_do_not_appear_in_repr(monkeypatch):
+    monkeypatch.setenv("INKDADDY_HA_MODE", "supervisor")
+    monkeypatch.setenv("SUPERVISOR_TOKEN", "private-token")
+    connection = supervisor_connection()
+    assert connection.base_url == SUPERVISOR_CORE_URL
+    assert connection.token == "private-token"
+    assert "private-token" not in repr(connection)
+
+
+def test_reads_supervisor_assigned_ingress_port():
+    with patch("inkdaddy_hub.ha_app.http.client.HTTPConnection") as make_connection:
+        connection = make_connection.return_value
+        response = connection.getresponse.return_value
+        response.status = 200
+        response.read.return_value = b'{"result":"ok","data":{"ingress_port":64112}}'
+        assert ingress_port("private-token") == 64112
+        connection.request.assert_called_once_with(
+            "GET", "/addons/self/info", headers={"Authorization": "Bearer private-token"}
+        )
+        connection.close.assert_called_once()
+
+
+def test_ingress_binds_to_the_supervisor_route():
+    with patch("inkdaddy_hub.ha_app.socket.socket") as make_socket:
+        route = make_socket.return_value.__enter__.return_value
+        route.getsockname.return_value = ("192.0.2.10", 38811)
+        assert ingress_host() == "192.0.2.10"
+        route.connect.assert_called_once_with((SUPERVISOR_IP, 9))
+
+
+def test_thread_border_router_reports_home_assistant_management(monkeypatch):
+    engine = create_engine("sqlite://")
+    Base.metadata.create_all(engine)
+    with Session(engine) as db:
+        monkeypatch.delenv("INKDADDY_HA_MODE", raising=False)
+        standalone_router = next(
+            item for item in list_integrations(db)["integrations"]
+            if item["id"] == "thread_border_router"
+        )
+        assert standalone_router["status"] == "diagnostics_required"
+        assert standalone_router["manage_url"] == "#diagnostics"
+
+        monkeypatch.setenv("INKDADDY_HA_MODE", "supervisor")
+        monkeypatch.setenv("SUPERVISOR_TOKEN", "private-token")
+        managed_router = next(
+            item for item in list_integrations(db)["integrations"]
+            if item["id"] == "thread_border_router"
+        )
+        assert managed_router["status"] == "managed_by_home_assistant"
+        assert managed_router["configured"] is None
+        assert managed_router["enabled"] is None
+        assert managed_router["manage_url"] == "/config/thread"
+
+def test_home_assistant_site_refresh_does_not_discard_cached_states(monkeypatch):
+    from sqlalchemy.orm import sessionmaker
+
+    from inkdaddy_hub import worker
+    from inkdaddy_hub.models import HAEntityCache, Setting
+    from inkdaddy_hub.services.dashboard_content import SITE_SETTING
+    from inkdaddy_hub.services.home_assistant import HAConnection
+
+    engine = create_engine("sqlite://")
+    Base.metadata.create_all(engine)
+    sessions = sessionmaker(engine)
+    with sessions.begin() as db:
+        db.add(HAEntityCache(entity_id="weather.home", domain="weather",
+                             state="sunny", attributes_json="{}"))
+    connection = HAConnection("http://supervisor/core", "test-token")
+    monkeypatch.setattr(worker, "SessionLocal", sessions)
+    monkeypatch.setattr(worker.home_assistant, "get_connection", lambda _db: connection)
+
+    def unavailable(_url, _token):
+        raise OSError("States unavailable")
+
+    monkeypatch.setattr(worker.home_assistant, "fetch_states", unavailable)
+    monkeypatch.setattr(worker.home_assistant, "fetch_site", lambda _connection: {
+        "location_name": "Test House",
+        "time_zone": "America/New_York",
+    })
+
+    worker.refresh_home_assistant()
+
+    with sessions() as db:
+        assert db.get(HAEntityCache, "weather.home").state == "sunny"
+        assert "America/New_York" in db.get(Setting, SITE_SETTING).value_json
+    engine.dispose()

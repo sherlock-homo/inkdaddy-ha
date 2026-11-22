@@ -1,0 +1,18 @@
+name: inkDaddy
+description: Manage and schedule photos and dashboards for inkDaddy ePaper displays
+version: "0.2.0-dev.16"
+slug: inkdaddy
+arch:
+  - aarch64
+  - amd64
+init: false
+ingress: true
+ingress_port: 0
+ingress_stream: true
+panel_title: inkDaddy
+panel_icon: mdi:image-frame
+panel_admin: true
+homeassistant_api: true
+host_network: true
+startup: application
+boot: auto
