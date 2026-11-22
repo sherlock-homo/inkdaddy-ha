@@ -25,7 +25,7 @@
 ### Render quality, power and release checks
 
 - [x] Compare six-color image rendering on synthetic portraits, skin tones, smooth gradients and dark detail. Keep vector text and widget borders clear. Test the chosen renderer on the exact 800 × 480 panel format and record render time, transfer bytes and output checksums.
-- [ ] Review worker, renderer and Matter performance. Keep the five-frame cache bounded, avoid repeated expensive work, and verify refresh timing and manual response after an idle period.
+- [x] Review worker, renderer and Matter performance. Keep the five-frame cache bounded, avoid repeated expensive work, and verify refresh timing and manual response after an idle period.
 - [ ] Review battery behavior separately from server polling. Verify the LiPo-only refresh, measure idle and refresh current at the battery connection, and check Thread reception at the final mounting spot.
 - [ ] Verify a clean device's QR-to-default-dashboard run and the four playback controls in Apple Home when an iPhone or unlocked Mirroring session is available. Verify platform limits on artwork separately.
 - [x] Independently review authentication, authorization, in-memory and persisted credential use, transport, file access and package dependencies. Scan the final Git tree, history, and package for secrets. Re-run integration and browser checks against the same build before publishing the V1 candidate.
@@ -43,6 +43,7 @@
 - A 48-hour playback simulation preserved five upcoming slots and the exact pending frame across restart. With two unchanged photo sources, the hub converted each photo once, down from 21 conversions, and retained at most seven raw assets (1.344 MB). A separate 12-hour run with a damaged photo preserved the queue and left no orphan files. Playback previews and managed Matter transfers verify the stored frame digest.
 - The packaged follow-up passed 143 Python tests, including four authenticated Matter transfers, and six controller tests. The same package passed the desktop and mobile browser workflows and the built application scan.
 - Standalone Home Assistant token replacement preserves the current token across failed writes and removes superseded tokens after a successful commit. The managed connection uses Supervisor credentials and bypasses the standalone store.
+- The installed App Store build offered a distinct, prepared photo 0.16 seconds after the hour. The matching Matter receipt arrived 65.7 seconds after the hour, the camera confirmed the panel changed, and all five future slots were prepared. This scheduled run used the USB-connected bench setup.
 
 ## First public app release
 
