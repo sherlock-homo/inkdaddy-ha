@@ -64,6 +64,35 @@ def test_photo_framing_persists_and_uploads_use_it(workflow_client, tmp_path, mo
     assert fitted.getpixel((0, 0)) == (255, 255, 255)
 
 
+def test_editor_can_save_corrected_pixels_without_changing_crop(workflow_client, tmp_path, monkeypatch):
+    import inkdaddy_hub.services.photos as photo_service
+
+    client, sessions = workflow_client
+    monkeypatch.setattr(photo_service, "get_settings", lambda: HubSettings(
+        data_dir=tmp_path, default_width=8, default_height=8,
+    ))
+    original = BytesIO()
+    Image.new("RGBA", (8, 8), (255, 0, 0, 0)).save(original, format="PNG")
+    photo = client.post("/api/photos", files={"file": ("transparent.png", original.getvalue(), "image/png")}).json()
+    base = f"/api/photos/{photo['id']}"
+    params = {"mode": "fit", "compare_saved": True}
+    draft = client.get(f"{base}/framing-preview", params=params)
+    assert draft.headers["X-InkDaddy-Preview-Changed"] == "false"
+
+    with sessions() as db:
+        row = db.get(Photo, int(photo["id"]))
+        # The previous release wrote the hidden red channel into the saved preview.
+        Image.new("RGB", (8, 8), "red").save(row.preview_path)
+    draft = client.get(f"{base}/framing-preview", params=params)
+    assert draft.headers["X-InkDaddy-Preview-Changed"] == "true"
+    assert Image.open(BytesIO(draft.content)).getpixel((0, 0)) == (255, 255, 255)
+    saved = client.put(f"{base}/framing", json={**photo["framing"], "revision": photo["revision"]})
+    assert saved.status_code == 200 and saved.json()["framing"] == photo["framing"]
+    assert client.get(saved.json()["preview_url"]).content == draft.content
+    assert client.get(f"{base}/framing-preview", params=params).headers["X-InkDaddy-Preview-Changed"] == "false"
+    assert "X-InkDaddy-Preview-Changed" not in client.get(f"{base}/framing-preview", params={"mode": "fill"}).headers
+
+
 def test_album_order_persists_and_invalid_changes_leave_saved_album_intact(workflow_client):
     client, sessions = workflow_client
     with sessions.begin() as db:

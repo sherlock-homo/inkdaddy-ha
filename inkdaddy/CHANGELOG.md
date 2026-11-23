@@ -1,3 +1,7 @@
+## 0.2.0-dev.22
+
+- Transparent photos now use the panel’s white background in Intelligent Crop, the framing editor, and the finished image. Re-edit an existing photo to render it from its original.
+
 ## 0.2.0-dev.21
 
 - The frame keeps a confirmed photo on screen when the same photo comes up again with identical pixels. **Refresh** still redraws it on demand.

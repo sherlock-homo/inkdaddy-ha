@@ -9,7 +9,7 @@ export type FramingPhoto = PhotoRecord & {
   revision?: string | null;
   can_edit_framing?: boolean;
 };
-type Preview = { path: string; url: string; x: number; y: number };
+type Preview = { path: string; url: string; x: number; y: number; differsFromSaved: boolean };
 
 function defaultCrop(mode: Framing): Crop {
   return { mode, x: null, y: null, zoom: 1 };
@@ -32,13 +32,15 @@ export function PhotoFramingEditor({ photo, onSaved, onCancel }: {
     params.set("x", String(crop.x));
     params.set("y", String(crop.y));
   }
+  const framingChanged = !photo.framing
+    || crop.mode !== photo.framing.mode || crop.zoom !== photo.framing.zoom
+    || crop.x !== photo.framing.x || crop.y !== photo.framing.y;
+  if (!framingChanged) params.set("compare_saved", "true");
   const previewPath = `${basePath}/framing-preview?${params}`;
   const previewReady = preview?.path === previewPath;
   const x = crop.x ?? (previewReady ? preview.x : 0.5);
   const y = crop.y ?? (previewReady ? preview.y : 0.5);
-  const changed = !photo.framing
-    || crop.mode !== photo.framing.mode || crop.zoom !== photo.framing.zoom
-    || crop.x !== photo.framing.x || crop.y !== photo.framing.y;
+  const canSave = previewReady && (framingChanged || preview.differsFromSaved);
 
   useEffect(() => { heading.current?.focus(); }, []);
   useEffect(() => {
@@ -57,6 +59,7 @@ export function PhotoFramingEditor({ photo, onSaved, onCancel }: {
           url: URL.createObjectURL(blob),
           x: readFocus(response, "X-InkDaddy-Focus-X"),
           y: readFocus(response, "X-InkDaddy-Focus-Y"),
+          differsFromSaved: response.headers.get("X-InkDaddy-Preview-Changed") === "true",
         });
       } catch (error) {
         if (!controller.signal.aborted) setPreviewError(framingError(error, "Unable to preview this framing."));
@@ -72,7 +75,7 @@ export function PhotoFramingEditor({ photo, onSaved, onCancel }: {
 
   async function save(event: FormEvent) {
     event.preventDefault();
-    if (saving || !changed || !previewReady || !photo.revision) return;
+    if (saving || !canSave || !photo.revision) return;
     setSaving(true);
     setSaveError("");
     try {
@@ -130,7 +133,7 @@ export function PhotoFramingEditor({ photo, onSaved, onCancel }: {
     </fieldset>}
     {(previewError || saveError) && <p role="alert" className="warning-text">{saveError || previewError}</p>}
     <div className="button-row">
-      <button className="primary-button" disabled={!changed || !previewReady || saving}>
+      <button className="primary-button" disabled={!canSave || saving}>
         {saving ? "Saving…" : "Save framing"}
       </button>
       <button type="button" className="secondary-button" disabled={saving} onClick={onCancel}>Cancel</button>

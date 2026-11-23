@@ -171,6 +171,7 @@ def preview_photo_framing(
     x: float | None = None,
     y: float | None = None,
     zoom: float = 1.0,
+    compare_saved: bool = False,
     db: Session = Depends(get_db),
 ) -> Response:
     photo = db.get(Photo, photo_id)
@@ -181,11 +182,15 @@ def preview_photo_framing(
     except (ValueError, OSError) as error:
         detail = str(error) if isinstance(error, ValueError) else "The original photo is unavailable."
         raise HTTPException(status_code=422, detail=detail) from error
-    return Response(content=content, media_type="image/png", headers={
+    headers = {
         "Cache-Control": "private, no-store",
         "X-InkDaddy-Focus-X": str(focus[0]),
         "X-InkDaddy-Focus-Y": str(focus[1]),
-    })
+    }
+    if compare_saved:
+        saved = read_photo_asset(photo.preview_path, "previews", limit=len(content))
+        headers["X-InkDaddy-Preview-Changed"] = "true" if saved != content else "false"
+    return Response(content=content, media_type="image/png", headers=headers)
 
 
 @router.put("/photos/{photo_id}/framing")

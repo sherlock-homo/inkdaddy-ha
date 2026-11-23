@@ -6,8 +6,10 @@ from datetime import datetime, timedelta, timezone
 from io import BytesIO
 from os import utime
 from pathlib import Path
+from struct import pack
 from threading import Barrier
 from uuid import uuid4
+from zlib import compress, crc32
 
 import pytest
 from fastapi import FastAPI
@@ -254,6 +256,140 @@ def test_intelligent_crop_can_be_the_saved_upload_default(photo_app):
 # Source and license at https://github.com/saucecontrol/Compact-ICC-Profiles/tree/bdd84663061bc4ae95ca70decff54f581e27f702
 _DISPLAY_P3 = Path(__file__).resolve().parents[1] / "fixtures" / "DisplayP3-v4.icc"
 _WARM_P3 = (190, 116, 102)
+
+
+def test_transparent_png_focus_edit_and_panel_use_only_visible_artwork(photo_app):
+    client, engine = photo_app
+    image = Image.new("RGBA", (1600, 480), (255, 0, 0, 0))
+    draw = ImageDraw.Draw(image)
+    for x in range(0, 800, 12):
+        draw.rectangle((x, 0, x + 5, 479), fill=(0, 0, 0, 0))
+    draw.rectangle((1280, 110, 1450, 350), fill=(0, 0, 0, 255))
+    draw.ellipse((1310, 160, 1390, 300), fill=(40, 110, 205, 128))
+    white = Image.new("RGBA", image.size, "white")
+    white.alpha_composite(image)
+    with BytesIO() as output:
+        image.save(output, format="PNG")
+        original = output.getvalue()
+    response = client.post("/api/photos/batch", data={"mode": "intelligent"}, files=uploads(("masked.png", original)))
+    assert response.status_code == 200
+    record = response.json()["photos"][0]
+    base = f"/api/photos/{record['id']}"
+    visible = white.convert("RGB")
+    for mode in ("intelligent", "fill"):
+        expected, focus = frame_photo(visible, (800, 480), PhotoFraming(mode))
+        preview = client.get(f"{base}/framing-preview", params={"mode": mode})
+        assert preview.status_code == 200
+        assert float(preview.headers["X-InkDaddy-Focus-X"]) == pytest.approx(focus[0], abs=1e-6)
+        assert Image.open(BytesIO(preview.content)).tobytes() == expected.tobytes()
+        if mode == "fill":
+            edited = client.put(f"{base}/framing", json={"mode": mode, "revision": record["revision"]})
+            assert edited.status_code == 200
+            record = edited.json()
+        assert client.get(record["preview_url"]).content == preview.content
+        assert client.get(record["frame_url"]).content == raw_photo_frame(expected)[0]
+    with Session(engine) as db:
+        assert Path(db.get(Photo, int(record["id"])).original_path).read_bytes() == original
+
+
+@pytest.mark.parametrize("mode,key,visible", [
+    ("RGB", (110, 30, 92), (80, 88, 96)),
+    ("P", 0, 1), ("P", bytes([0, 128]), 1), ("L", 3, 70), ("1", 0, 255),
+    ("LA", (12, 0), (84, 140)), ("RGBA", (230, 20, 90, 0), (80, 88, 96, 128)),
+    ("I;16", 128, 32896),
+])
+def test_png_transparency_modes_render_against_white(tmp_path, mode, key, visible):
+    keyed = mode not in ("LA", "RGBA")
+    image = Image.new(mode, (2, 1), 0 if mode == "P" else key)
+    image.putpixel((1, 0), visible)
+    if mode == "P":
+        image.putpalette([158, 80, 102, 46, 122, 74] + [0] * 762)
+    original = tmp_path / "input.png"
+    image.save(original, transparency=key if keyed else None)
+    with Image.open(original) as uploaded:
+        if mode == "I;16":
+            expected = (128, 128, 128)
+        else:
+            rgba = uploaded.convert("RGBA")
+            background = Image.new("RGBA", rgba.size, "white")
+            background.alpha_composite(rgba)
+            expected = background.getpixel((1, 0))[:3]
+    result, _ = photos._render_framed_photo(
+        original, PhotoFraming("fill"), HubSettings(data_dir=tmp_path, default_width=2, default_height=1)
+    )
+    assert result.getpixel((0, 0)) == (255, 255, 255)
+    assert result.getpixel((1, 0)) == expected
+
+
+def test_transparent_webp_uses_the_same_white_background(tmp_path):
+    image = Image.new("RGBA", (2, 1), (0, 0, 0, 0))
+    image.putpixel((1, 0), (0, 0, 0, 128))
+    with BytesIO() as output:
+        image.save(output, format="WEBP", lossless=True)
+        output.seek(0)
+        result, _ = photos._render_framed_photo(
+            output, PhotoFraming("fit"), HubSettings(data_dir=tmp_path, default_width=2, default_height=1)
+        )
+    assert list(result.get_flattened_data()) == [(255, 255, 255), (127, 127, 127)]
+
+
+def test_opaque_alpha_keeps_rgb_processing_and_translucent_p3_blends_in_srgb(tmp_path):
+    settings = HubSettings(data_dir=tmp_path, default_width=180, default_height=90)
+    profile = _DISPLAY_P3.read_bytes()
+    color = _off_center_fixture()
+    rgba = color.convert("RGBA")
+    for name, image in [("rgb", color), ("opaque", rgba)]:
+        image.save(tmp_path / f"{name}.png", icc_profile=profile)
+    rgb = photos.process_photo_file("rgb", tmp_path / "rgb.png", mode="intelligent", settings=settings)
+    opaque = photos.process_photo_file("opaque", tmp_path / "opaque.png", mode="intelligent", settings=settings)
+    assert rgb.preview_path.read_bytes() == opaque.preview_path.read_bytes()
+    assert rgb.frame_path.read_bytes() == opaque.frame_path.read_bytes()
+
+    translucent = Image.new("RGBA", (180, 90), (*_WARM_P3, 128))
+    translucent.save(tmp_path / "translucent.png", icc_profile=profile)
+    result = photos.process_photo_file("blend", tmp_path / "translucent.png", settings=settings)
+    with Image.open(result.preview_path) as preview:
+        assert preview.getpixel((90, 45)) == pytest.approx((228, 183, 176), abs=1)
+        assert preview.info == {"srgb": 1}
+
+
+def _png_with_transparent_key(depth, color_type, key, pixels):
+    def chunk(kind, data):
+        return pack(">I", len(data)) + kind + data + pack(">I", crc32(kind + data))
+
+    header = pack(">IIBBBBB", 2, 1, depth, color_type, 0, 0, 0)
+    return (b"\x89PNG\r\n\x1a\n" + chunk(b"IHDR", header) + chunk(b"tRNS", key)
+            + chunk(b"IDAT", compress(b"\x00" + pixels)) + chunk(b"IEND", b""))
+
+
+@pytest.mark.parametrize("depth,key,pixels", [(2, 2, b"\x80"), (4, 8, b"\x80")])
+def test_low_bit_png_transparency_matches_the_expanded_gray(tmp_path, depth, key, pixels):
+    png = _png_with_transparent_key(depth, 0, pack(">H", key), pixels)
+    image, _ = photos._render_framed_photo(BytesIO(png), PhotoFraming("fit"), HubSettings(
+        data_dir=tmp_path, default_width=2, default_height=1))
+    assert list(image.get_flattened_data()) == [(255, 255, 255), (0, 0, 0)]
+
+
+@pytest.mark.parametrize("options", [{}, {"transparency": 0}, {"transparency": 20000}])
+def test_high_depth_gray_keeps_shades_with_or_without_a_key(tmp_path, options):
+    source = Image.frombytes("I;16", (2, 1), pack("<2H", 10000, 20000))
+    png = BytesIO()
+    source.save(png, format="PNG", **options)
+    png.seek(0)
+    image, _ = photos._render_framed_photo(png, PhotoFraming("fit"), HubSettings(
+        data_dir=tmp_path, default_width=2, default_height=1))
+    second = 255 if options.get("transparency") == 20000 else 78
+    assert list(image.get_flattened_data()) == [(39, 39, 39), (second, second, second)]
+
+
+def test_high_depth_rgb_png_key_reports_an_actionable_unsupported_format(photo_app):
+    client, _ = photo_app
+    # Both colors decode to the same 8-bit triplet, but only the first is transparent.
+    key = (6000, 9000, 12000)
+    png = _png_with_transparent_key(16, 2, pack(">3H", *key), pack(">6H", *key, 6001, 9001, 12001))
+    response = client.post("/api/photos", files={"file": ("key.png", png, "image/png")})
+    assert response.status_code == 422
+    assert "alpha channel or as an 8-bit PNG" in response.json()["detail"]
 
 
 @pytest.mark.parametrize("mode", ["fit", "fill", "crop"])

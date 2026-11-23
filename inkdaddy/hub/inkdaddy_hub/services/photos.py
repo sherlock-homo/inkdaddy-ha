@@ -198,10 +198,7 @@ def process_photo_file(
 def _render_framed_photo(
     source: Path | BinaryIO, framing: PhotoFraming, settings: HubSettings
 ) -> tuple[Image.Image, tuple[float, float]]:
-    image = _decode_photo(source, native_mode=True)
-    profile = _embedded_rgb_profile(image)
-    if image.mode != "RGB":
-        image = image.convert("RGB")
+    image, profile = _photo_on_white(_decode_photo(source, native_mode=True))
     width, height = settings.default_width, settings.default_height
     size = (width, height)
     framed, focus = frame_photo(image, size, framing)
@@ -213,6 +210,29 @@ def _render_framed_photo(
         canvas.paste(processed, offset)
         processed = canvas
     return processed, focus
+
+
+def _photo_on_white(image: Image.Image) -> tuple[Image.Image, bytes | None]:
+    profile = _embedded_rgb_profile(image)
+    if image.mode == "I;16":
+        # Match the original 16-bit grayscale key before reducing samples to 8 bits.
+        levels = bytearray((value + 128) // 257 for value in range(65536))
+        if (key := image.info.get("transparency")) is not None:
+            levels[key] = 255
+        return image.convert("I").point(levels, "L").convert("RGB"), profile
+    if not image.has_transparency_data:
+        return (image if image.mode == "RGB" else image.convert("RGB")), profile
+
+    if image.mode not in ("RGBA", "LA"):
+        image = image.convert("RGBA")
+    alpha = image.getchannel("A")
+    if alpha.getextrema()[0] == 255:
+        return image.convert("RGB"), profile
+    # Mix visible colors with the display's sRGB white before scoring or resampling pixels.
+    # The opaque path can still defer color conversion until after resizing.
+    rgb = _normalize_rgb(image.convert("RGB"), profile)
+    rgb.paste("white", mask=ImageOps.invert(alpha))
+    return rgb, None
 
 
 def _photo_png(processed: Image.Image) -> bytes:
@@ -298,6 +318,14 @@ def _decode_photo(source: Path | BinaryIO, *, native_mode: bool = False) -> Imag
                 or source_width * source_height > MAX_IMAGE_PIXELS
             ):
                 raise PhotoProcessingError("Uploaded image dimensions exceed the supported limit.")
+            if native_mode and opened.format == "PNG" and "transparency" in opened.info and opened.tile:
+                raw_mode = opened.tile[0].args
+                if raw_mode == "RGB;16B":
+                    # Pillow reduces RGB to 8 bits before the exact original key can be matched.
+                    raise PhotoProcessingError("Export this 16-bit RGB PNG with an alpha channel or as an 8-bit PNG.")
+                if raw_mode in ("L;2", "L;4"):
+                    # Pillow expands the gray pixels to 8 bits but retains the original PNG key.
+                    opened.info["transparency"] *= 85 if raw_mode == "L;2" else 17
             image = ImageOps.exif_transpose(opened)
             return image if native_mode else image.convert("RGB")
     except PhotoProcessingError:
