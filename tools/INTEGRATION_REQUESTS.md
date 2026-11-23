@@ -4,14 +4,34 @@ The inkDaddy Integrations page saves requests on the app installation. Each requ
 
 A delivery status of **Accepted by owner relay** means the relay acknowledged the exact integration identifier. An accepting relay returns HTTP 201 for a new request or HTTP 200 for a duplicate, with a JSON body containing `status: accepted` and the matching `integration_id`. Review and development are separate owner actions.
 
-## Set up an owner relay
+## Run the inbox on the owner’s Mac
+
+From a trusted checkout, run the installer once while logged in to macOS. The installer reads the committed source, so select the revision you reviewed.
+
+```sh
+python3 tools/install_request_inbox.py --revision "$(git rev-parse HEAD)"
+```
+
+The two login agents run the relay on `127.0.0.1:8779` and check for new requests every five minutes. The notification uses fixed text so an integration name never appears on the lock screen. macOS controls banner visibility. If a post fails, the next check retries it. A crash between macOS accepting a post and the queue recording it can repeat a notification.
+
+The installer stores its two generated tokens and `relay.sqlite` in `~/.local/share/inkdaddy-requests` with owner-only access. Re-running the installer from a newer reviewed commit preserves the database and credentials. To inspect the jobs, run `launchctl print "gui/$(id -u)/com.inkdaddy.requests.relay"` and substitute `com.inkdaddy.requests.notify` for the notification job. To stop either job for the current login, use `launchctl bootout` with its same service name.
+
+To see what arrived, list the local inbox from the checkout.
+
+```sh
+inkdaddy_review_dir="$HOME/.local/share/inkdaddy-requests"
+python3 tools/integration_request_bridge.py --db "$inkdaddy_review_dir/relay.sqlite" list
+```
+
+## Connect an installation to the owner relay
 
 Choose a public DNS name with a trusted HTTPS certificate. The app connects on port 443 and accepts the configured path directly. Configure its reverse proxy to forward POST and GET at `/v1/integration-requests` to the loopback relay, preserve the Authorization header, apply request and connection limits, and avoid logging headers, bodies, and sender addresses. The app keeps requests local until a relay URL and ingest token are configured.
 
-Keep the queue and credentials in a private local directory outside the repository. Generate two distinct tokens and store them in owner-only files.
+The Mac installer starts the relay and creates its credentials. For a separate host, create the private directory and credentials once, then start the relay there. The following first-run example uses shell noclobber to protect existing credentials.
 
 ```sh
 umask 077
+set -C
 inkdaddy_review_dir="$HOME/.local/share/inkdaddy-requests"
 mkdir -p "$inkdaddy_review_dir"
 python3 -c 'import secrets; print(secrets.token_urlsafe(48))' > "$inkdaddy_review_dir/ingest.token"
@@ -29,7 +49,7 @@ The app deduplicates integration names and limits new requests to five per insta
 
 ## Pick up and review on the Mac mini
 
-On the owner’s Mac mini, use `pickup` to copy the validated review queue into a separate private SQLite database. The owner can also inspect the relay’s local database directly when running the relay on the same machine.
+On a Mac hosting the relay, notifications and the local inbox work as soon as a request arrives. If another machine hosts the relay, use `pickup` to copy its validated requests into a private review database on the Mac. A pickup copies request identities and preserves decisions made in the destination database.
 
 ```sh
 python3 tools/integration_request_bridge.py --db "$inkdaddy_review_dir/review.sqlite" pickup \
@@ -66,3 +86,23 @@ python3 tools/integration_request_bridge.py --db "$inkdaddy_review_dir/review.sq
 Codex CLI must already be provisioned in that development environment. The launcher verifies the selected commit and exports its tracked files into two fresh local folders. Git replacement refs are ignored. The developer can write in its workspace and run local tests. The independent reviewer receives a clean source snapshot and the proposed patch in a read-only session. Request data and patch contents are passed as files. Shell network access and web search are disabled for these sessions. The developer’s writable roots exclude shared temporary directories. The Codex CLI still uses its configured model service.
 
 Read the local `development.txt` and `review.txt` reports alongside `review/proposed.patch`. The owner controls whether and how to move the resulting changes into a real project. Publishing and deployment require separate owner action.
+
+## Run approved work automatically
+
+In the dedicated worker, keep one private review database outside the source checkout. Import requests into that queue and run `decide` there. Pickup transfers the request ID and name. The approval belongs to the queue where the owner records it. Keep that database across restarts so it can remember previous attempts.
+
+With Codex CLI provisioned in the worker and the source pinned to a reviewed commit, start the dispatcher there. The example checks for approved requests every five minutes.
+
+```sh
+python3 tools/integration_request_dispatch.py --db "$inkdaddy_review_dir/review.sqlite" \
+  --source "$inkdaddy_review_source" --revision "$inkdaddy_review_revision" --watch-seconds 300
+```
+
+Omit `--watch-seconds` for a single check. Inspect attempts for the pinned revision with the following command.
+
+```sh
+python3 tools/integration_request_dispatch.py --db "$inkdaddy_review_dir/review.sqlite" \
+  --revision "$inkdaddy_review_revision" --status
+```
+
+Each attempt keeps its reports and patch in a private directory beside the database. The dispatcher remembers completed requests across source revisions. To start a fresh attempt after a failure or interruption, use the single-check command with `--retry "$inkdaddy_request_id"`. Review the resulting patch before publishing it.

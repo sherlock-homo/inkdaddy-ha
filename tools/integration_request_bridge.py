@@ -59,7 +59,7 @@ def token_file(path: Path) -> str:
 @contextmanager
 def open_queue(path: Path):
     path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
-    parent = path.parent.stat(follow_symlinks=False)
+    parent = path.parent.lstat()
     if not stat.S_ISDIR(parent.st_mode) or parent.st_uid != os.getuid() or parent.st_mode & 0o077:
         raise ValueError("The owner queue directory must be private and owned by the current user.")
     fd = os.open(path, os.O_CREAT | os.O_RDWR | os.O_NOFOLLOW | os.O_NONBLOCK, 0o600)
@@ -230,6 +230,44 @@ def pickup(url: str, token: str, path: Path) -> int:
     return add_requests(path, requests, rate_limit=False)
 
 
+def notify_pending(path: Path) -> int:
+    """Ask macOS to notify the owner once per batch of new, undecided requests."""
+    import fcntl
+
+    with open_queue(path) as db:
+        db.execute("CREATE TABLE IF NOT EXISTS request_notifications (integration_id TEXT PRIMARY KEY)")
+        # Serialize notifiers without holding a SQLite write lock while macOS responds.
+        lock_path = path.with_name(path.name + ".notify.lock")
+        flags = os.O_RDWR | os.O_CREAT | os.O_NOFOLLOW | os.O_NONBLOCK
+        with os.fdopen(os.open(lock_path, flags, 0o600), "rb+") as lock:
+            metadata = os.fstat(lock.fileno())
+            if not stat.S_ISREG(metadata.st_mode) or metadata.st_uid != os.getuid() or metadata.st_mode & 0o077:
+                raise ValueError("The notification lock must be a private file owned by the current user.")
+            try:
+                fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            except BlockingIOError:
+                return 0
+            pending = db.execute("""
+                SELECT integration_id FROM integration_requests WHERE decision = 'pending'
+                EXCEPT SELECT integration_id FROM request_notifications
+            """).fetchall()
+            if not pending:
+                return 0
+            message = 'display notification "New integration requests are ready to review." with title "inkDaddy"'
+            try:
+                subprocess.run(
+                    ["/usr/bin/osascript", "-e", message],
+                    stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                    env={key: os.environ[key] for key in ("HOME", "LANG") if key in os.environ},
+                    check=True, timeout=10,
+                )
+            except (OSError, subprocess.SubprocessError):
+                raise ValueError("macOS could not post the notification. The next check will retry.") from None
+            db.executemany("INSERT INTO request_notifications (integration_id) VALUES (?)", pending)
+            db.commit()  # Persist successful delivery before releasing the notifier lock.
+            return len(pending)
+
+
 def decide(path: Path, integration_id: str, decision: str) -> None:
     if INTEGRATION_ID_PATTERN.fullmatch(integration_id) is None:
         raise ValueError("Invalid integration identifier.")
@@ -324,6 +362,7 @@ def main() -> int:
     watcher.add_argument("--seconds", type=int, default=300)
 
     commands.add_parser("list", help="List saved requests and owner review decisions.")
+    commands.add_parser("notify", help="Post a private macOS notification for new pending requests.")
     decision = commands.add_parser("decide", help="Record an explicit owner review decision.")
     decision.add_argument("integration_id")
     decision.add_argument("decision", choices=("approved", "declined"))
@@ -349,6 +388,8 @@ def main() -> int:
             print(f"Saved {pickup(args.url, token_file(args.review_token_file), args.db)} new requests.")
         elif args.command == "watch":
             watch(args.url, args.db, args.review_token_file, args.seconds)
+        elif args.command == "notify":
+            notify_pending(args.db)
         elif args.command == "list":
             with open_queue(args.db) as db:
                 print(json.dumps([dict(row) for row in db.execute(
