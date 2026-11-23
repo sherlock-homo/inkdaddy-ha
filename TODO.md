@@ -1,5 +1,15 @@
 # inkDaddy Home Assistant repository checklist
 
+## V1 follow-up
+
+- [x] Keep the last confirmed pixels on the panel when a scheduled slot repeats the same photo. Verify that manual refresh still sends, that changed artwork still sends, and that a restart preserves the receipt.
+- [x] Label scheduled dashboard clocks clearly even when the owner gives the widget a custom title. Verify the editor's behavior when navigating with unsaved changes.
+- [x] Show the installed app’s native update page, release and auto-update status, plus registered displays’ reported firmware. Verify recovery when Supervisor details are unavailable and refresh the app entry page after upgrades.
+- [x] Exercise the packaged update, run the secret, dependency, performance and browser checks.
+- [ ] Verify the new store version through live Home Assistant Ingress and observe the next unchanged scheduled photo.
+
+The dev.21 Mac test suite passed 214 Python tests and six Node tests. The amd64 package passed 213 Python tests and six Node tests, including an authenticated Matter transfer after an explicit refresh. In a 24-hour one-photo schedule the hub skipped all 24 repeated transfers and kept the original receipt. The renderer reproduced all five reference bitmaps. Package browser checks covered the no-code editor at 390 and 1100 px, the update links, and the cached shell upgrade. Gitleaks scans of the source, history and packaged app found zero secrets. Bandit reported zero medium or high findings, and the Python and npm dependency audits reported zero known vulnerabilities.
+
 ## Photo playback customization
 
 - [x] Add Intelligent Crop and an editor for existing photos. Preserve the original and previous processed, preview, and raw versions.

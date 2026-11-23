@@ -89,14 +89,25 @@ def prepare_matter_frame(
     active = db.get(MatterFrameTransfer, device.id)
     previous = db.get(PlaybackOffer, active.playback_offer_id) if active else None
     latest = _latest_offer_id(db, device.id)
+    playback = db.get(Playback, device.id)
+    assert playback is not None
+    same_artwork = (
+        active is not None and previous is not None and previous.id == latest
+        and previous.frame_id == slot.frame_id and previous.title == slot.title
+        and previous.source_type == slot.source_type and previous.source_id == slot.source_id
+    )
     if (
-        active is None
-        or previous is None
-        or previous.id != latest
-        or previous.scheduled_minute != slot.scheduled_minute
-        or previous.frame_id != slot.frame_id
+        same_artwork and previous.scheduled_minute < slot.scheduled_minute
+        and active.acknowledged_at is not None and previous.id == playback.current_offer_id
+        and device.last_frame_id == slot.frame_id and playback.manual_request_minute != slot.scheduled_minute
+    ):
+        # Keep the authenticated receipt and its timestamp. No panel refresh occurred.
+        slot.retained_offer_id = previous.id
+    elif (
+        not same_artwork or previous.scheduled_minute != slot.scheduled_minute
         or active.render_key != slot.render_key
     ):
+        slot.retained_offer_id = None
         previous = PlaybackOffer(
             device_id=device.id,
             scheduled_minute=slot.scheduled_minute,
@@ -119,8 +130,6 @@ def prepare_matter_frame(
         active.render_key = slot.render_key
         active.acknowledged_at = None
         db.flush()
-    playback = db.get(Playback, device.id)
-    assert playback is not None
     return MatterFrameOffer(
         transfer_id=active.transfer_id,
         frame_id=frame.frame_id,
@@ -132,7 +141,7 @@ def prepare_matter_frame(
         acknowledged=active.acknowledged_at is not None,
         source_type=slot.source_type,
         source_id=slot.source_id,
-        scheduled_at=scheduled_time(slot.scheduled_minute),
+        scheduled_at=scheduled_time(previous.scheduled_minute),
     )
 
 
@@ -140,6 +149,15 @@ def load_matter_frame_payload(db: Session, device: Device, offer: MatterFrameOff
     """Read the exact offered asset in the same write transaction that prepared it."""
     scheduled_minute = epoch_minute(offer.scheduled_at)
     slot = db.get(PlaybackSlot, (device.id, scheduled_minute))
+    if slot is None and offer.acknowledged:
+        # The queue can prune the original slot while the display keeps its confirmed image.
+        slot = db.scalar(
+            select(PlaybackSlot)
+            .join(MatterFrameTransfer, MatterFrameTransfer.playback_offer_id == PlaybackSlot.retained_offer_id)
+            .where(PlaybackSlot.device_id == device.id, MatterFrameTransfer.device_id == device.id,
+                   MatterFrameTransfer.transfer_id == offer.transfer_id)
+            .order_by(PlaybackSlot.scheduled_minute.desc()).limit(1)
+        )
     frame = db.scalar(select(Frame).where(Frame.frame_id == offer.frame_id))
     if slot is None or slot.frame_id != offer.frame_id or frame is None or frame.sha256 != offer.sha256:
         raise MatterFrameError("The prepared frame changed before delivery.")

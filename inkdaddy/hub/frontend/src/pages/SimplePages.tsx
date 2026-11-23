@@ -141,7 +141,32 @@ type HubUpdate = {
   current_version: string;
   latest_version?: string | null;
   update_available?: boolean;
+  auto_update?: boolean;
+  manage_path?: string;
 };
+
+function DisplayFirmware() {
+  type Display = { device_id: string; name: string; firmware_version?: string };
+  const [registry, setRegistry] = useState<{ available: boolean; devices: Display[] } | null>(null);
+  useEffect(() => {
+    const controller = new AbortController();
+    void apiJson<{ available: boolean; devices: Display[] }>("/api/matter-frames/home-assistant", { signal: controller.signal })
+      .then((result) => { if (!controller.signal.aborted) setRegistry(result); })
+      .catch(() => { if (!controller.signal.aborted) setRegistry({ available: false, devices: [] }); });
+    return () => controller.abort();
+  }, []);
+  if (registry === null) return <p role="status">Loading registered displays…</p>;
+  if (!registry.available || !registry.devices.length) return <>
+    <p>{registry.available ? "Home Assistant has no registered inkDaddy displays." : "Home Assistant’s device registry is unavailable."}</p>
+    <a className="secondary-link" href="/config/devices/dashboard" target="_parent">Open Home Assistant devices</a>
+  </>;
+  return <ul className="firmware-displays">{registry.devices.map((device) =>
+    <li key={device.device_id}>
+      <a href={`/config/devices/device/${encodeURIComponent(device.device_id)}`} target="_parent">{device.name}</a>
+      <span>{device.firmware_version ? `Firmware ${device.firmware_version}` : "Firmware version unavailable"}</span>
+    </li>
+  )}</ul>;
+}
 
 function UpdatesPage() {
   const [update, setUpdate] = useState<HubUpdate | null>(null);
@@ -169,9 +194,14 @@ function UpdatesPage() {
         <h2>inkDaddy app</h2>
         {update && <dl className="update-list">
           <div><dt>Installed</dt><dd>{update.current_version}</dd></div>
-          {!managed && update.latest_version && <div><dt>Available release</dt><dd>{update.latest_version}</dd></div>}
+          {update.latest_version && <div><dt>{managed ? "Latest in Apps" : "Available release"}</dt><dd>{update.latest_version}</dd></div>}
+          {managed && typeof update.auto_update === "boolean" && <div><dt>Automatic updates</dt><dd>{update.auto_update ? "On" : "Off"}</dd></div>}
         </dl>}
-        {managed ? <a className="secondary-link" href="/hassio/dashboard" target="_parent">Manage app in Home Assistant</a> : <>
+        {managed ? <>
+          {update?.update_available && <p>Home Assistant has an update ready to install.</p>}
+          {!update?.latest_version && <p>Open Apps to check for a new release.</p>}
+          <a className="secondary-link" href={update?.manage_path ?? "/config/apps"} target="_parent">Manage app in Home Assistant</a>
+        </> : <>
           {update && <p>{update.update_available ? "A newer release is available." : update.status === "current" ? "Up to date." : update.status === "not_configured" ? "A release channel has not been configured." : "Release information is unavailable."}</p>}
           <button className="secondary-button" disabled={busy} onClick={() => void check()}>{busy ? "Checking…" : "Check for updates"}</button>
         </>}
@@ -179,7 +209,7 @@ function UpdatesPage() {
       <section className="update-panel">
         <h2>Display firmware</h2>
         <p>Your Matter controller handles firmware updates.</p>
-        {managed && <a className="secondary-link" href="/config/devices/dashboard" target="_parent">Open Home Assistant devices</a>}
+        {managed && <DisplayFirmware />}
       </section>
     </div>
   </div>;

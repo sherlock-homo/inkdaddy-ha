@@ -59,6 +59,9 @@ async def ingress_only(
             )
             if path.startswith("/api/"):
                 headers["cache-control"] = "no-store"
+            elif path in {"", "/", "/index.html"}:
+                # Revalidate the shell after an upgrade so it selects the new hashed bundle.
+                headers["cache-control"] = "no-cache"
         await send(message)
 
     if scope.get("method", "GET") in READ_METHODS:
@@ -131,6 +134,27 @@ def ingress_port(token: str) -> int:
     if type(port) is not int or not 62000 <= port <= 65500:
         raise RuntimeError("Supervisor did not assign an Ingress port.")
     return port
+
+
+def app_update_details(token: str) -> dict[str, object]:
+    """Return only the fields that the managed Updates page needs."""
+    if not token:
+        return {}
+    try:
+        info = _supervisor_info(token, "/addons/self/info")
+    except RuntimeError:
+        return {}
+    result: dict[str, object] = {}
+    slug = info.get("slug")
+    if isinstance(slug, str) and re.fullmatch(r"[a-z0-9_-]{1,128}", slug):
+        result["manage_path"] = f"/config/app/{slug}/info"
+    latest = info.get("version_latest")
+    if isinstance(latest, str) and latest:
+        result["latest_version"] = latest
+    for name in ("update_available", "auto_update"):
+        if isinstance(info.get(name), bool):
+            result[name] = info[name]
+    return result
 
 
 def ingress_host() -> str:

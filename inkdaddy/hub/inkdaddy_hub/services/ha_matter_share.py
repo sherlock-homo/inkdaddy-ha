@@ -99,11 +99,15 @@ def _candidate(row: object) -> dict[str, str] | None:
     if reported_serial is not None and reported_serial != serial:
         return None
     name = row.get("name_by_user") or row.get("name") or "inkDaddy"
-    return {
+    candidate = {
         "device_id": device_id,
         "name": name[:128] if isinstance(name, str) else "inkDaddy",
         "device_uid": serial,
     }
+    version = row.get("sw_version")
+    if isinstance(version, str) and version.strip():
+        candidate["firmware_version"] = version.strip()[:128]
+    return candidate
 
 
 @contextmanager

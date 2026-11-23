@@ -3,6 +3,7 @@ from __future__ import annotations
 from fastapi import APIRouter, HTTPException
 
 from ..config import get_settings
+from ..ha_app import app_update_details
 from ..services.home_assistant import supervisor_connection
 from ..services.updates import (
     firmware_manifest_response,
@@ -19,8 +20,12 @@ router = APIRouter(prefix="/api/updates", tags=["updates"])
 @router.get("/hub/check")
 @router.post("/hub/check")
 def hub_update_check() -> dict[str, object]:
-    if supervisor_connection():
-        return {"status": "managed_by_home_assistant", "current_version": get_settings().version}
+    if managed := supervisor_connection():
+        return {
+            "status": "managed_by_home_assistant",
+            "current_version": get_settings().version,
+            **app_update_details(managed.token),
+        }
     return hub_update_response(get_hub_update_info())
 
 

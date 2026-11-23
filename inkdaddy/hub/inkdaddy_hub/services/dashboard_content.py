@@ -20,7 +20,7 @@ from .rendering import _font
 
 SITE_SETTING = "home_assistant.site"
 DashboardTimeKind = Literal["scheduled", "manual", "preview"]
-DashboardRenderVersion = Literal["current", "previous", "legacy"]
+DashboardRenderVersion = Literal["current", "dev20", "previous", "legacy"]
 
 
 @dataclass(frozen=True)
@@ -129,7 +129,8 @@ def resolve_widget_text(
         local = timestamp.astimezone(ZoneInfo("UTC"))
     observed_at = observed_at or datetime.now(timezone.utc)
     widgets: list[WidgetText] = []
-    show_agenda = render_version == "current" and any(w["source"].get("type") == "calendar" for w in config["widgets"])
+    supports_overlay_widgets = render_version in ("current", "dev20")
+    show_agenda = supports_overlay_widgets and any(w["source"].get("type") == "calendar" for w in config["widgets"])
     agenda_scope = calendar_scope(db) if show_agenda else None
     for widget in config["widgets"]:
         options = widget["options"]
@@ -145,12 +146,14 @@ def resolve_widget_text(
                 clock_label, detail = "Refresh request", local.strftime("Requested %a, %b %d")
             elif time_kind == "preview":
                 clock_label, detail = "Preview time", local.strftime("Preview %a, %b %d")
-            else:
+            elif render_version == "dev20":
                 clock_label, detail = "Scheduled time", local.strftime("For %a, %b %d")
+            else:
+                clock_label, detail = "Scheduled time", local.strftime("Scheduled %a, %b %d")
             widgets.append(WidgetText(label or clock_label, local.strftime("%H:%M"), detail))
-        elif source_type == "date" and render_version == "current":
+        elif source_type == "date" and supports_overlay_widgets:
             widgets.append(WidgetText(label or "Date", local.strftime("%a, %b %d")))
-        elif source_type == "calendar" and render_version == "current":
+        elif source_type == "calendar" and supports_overlay_widgets:
             rows = upcoming_agenda(
                 agenda_scope, calendar_id(source.get("entity_id")), local,
                 show_titles=options.get("show_event_titles") is True, limit=4 if widget["h"] > 1 else 3,
@@ -175,7 +178,7 @@ def resolve_widget_text(
                 WidgetText(
                     label or "Display battery",
                     f"{sample:.0f}%" if sample is not None else "Unavailable",
-                    "Last reported" if sample is not None and render_version == "current" else "",
+                    "Last reported" if sample is not None and supports_overlay_widgets else "",
                 )
             )
         elif source.get("entity_id") or source_type == "weather":

@@ -103,6 +103,55 @@ def test_ingress_binds_to_the_supervisor_route():
         route.connect.assert_called_once_with((SUPERVISOR_IP, 9))
 
 
+def test_ingress_revalidates_entry_page_without_disabling_asset_caching():
+    app = FastAPI()
+
+    @app.get("/{path:path}")
+    def placeholder(path: str):
+        return {}
+
+    client = TestClient(partial(ingress_only, app), client=(SUPERVISOR_IP, 1111))
+    for path in ("/", "/index.html"):
+        assert client.get(path).headers["cache-control"] == "no-cache"
+    assert "cache-control" not in client.get("/assets/fixture.js").headers
+    assert client.get("/api/health").headers["cache-control"] == "no-store"
+
+
+def test_update_details_allowlist_only_the_apps_own_release_status(monkeypatch):
+    from inkdaddy_hub import ha_app
+
+    metadata = {
+        "slug": "fixture_inkdaddy", "version_latest": "0.2.1", "update_available": True,
+        "auto_update": False, "options": {"hidden": "fixture"}, "ingress_url": "/private/fixture",
+    }
+
+    def self_info(token, path):
+        assert token == "fixture" and path == "/addons/self/info"
+        return metadata
+
+    monkeypatch.setattr(ha_app, "_supervisor_info", self_info)
+    assert ha_app.app_update_details("fixture") == {
+        "manage_path": "/config/app/fixture_inkdaddy/info", "latest_version": "0.2.1",
+        "update_available": True, "auto_update": False,
+    }
+    metadata.update(slug="../other", auto_update="false", update_available=None, version_latest=None)
+    assert ha_app.app_update_details("fixture") == {}
+    assert ha_app.app_update_details("") == {}
+    with patch.object(ha_app, "_supervisor_info", side_effect=RuntimeError):
+        assert ha_app.app_update_details("fixture") == {}
+
+
+def test_only_reported_firmware_is_exposed_for_registered_displays():
+    from inkdaddy_hub.services.ha_matter_share import _candidate
+
+    uid = "xiao-mg24-aabbccdd"
+    row = {"model": "inkDaddy", "id": "a" * 32, "sw_version": "  6.0  ", "private_field": "fixture",
+           "identifiers": [["matter", f"serial_{uid}"], ["matter", f"deviceid_{'1'*16}-{'2'*16}-MatterNodeDevice"]]}
+    assert _candidate(row) == {"device_id": "a" * 32, "name": "inkDaddy", "device_uid": uid, "firmware_version": "6.0"}
+    assert "firmware_version" not in _candidate({**row, "sw_version": None})
+    assert _candidate({**row, "model": "other"}) is None
+
+
 def test_thread_border_router_reports_home_assistant_management(monkeypatch):
     engine = create_engine("sqlite://")
     Base.metadata.create_all(engine)
@@ -238,6 +287,7 @@ def test_playback_clock_schema_migrates_existing_rows_idempotently(monkeypatch):
         connection.exec_driver_sql("ALTER TABLE playback_offers RENAME COLUMN scheduled_minute TO hour")
         connection.exec_driver_sql("ALTER TABLE playback DROP COLUMN manual_requested_at")
         connection.exec_driver_sql("ALTER TABLE playback_slots DROP COLUMN manual_observed_at")
+        connection.exec_driver_sql("ALTER TABLE playback_slots DROP COLUMN retained_offer_id")
         connection.exec_driver_sql(
             "INSERT INTO playback (device_id, playlist_json, anchor_hour, anchor_position, paused) "
             "VALUES (1, '[]', 7, 2, 1)"
@@ -261,5 +311,5 @@ def test_playback_clock_schema_migrates_existing_rows_idempotently(monkeypatch):
         assert state.manual_request_minute is state.manual_requested_at is None
         assert db.get(PlaybackOffer, state.current_offer_id).scheduled_minute == 420
         assert (slot.frame_id, slot.render_key) == ("old-frame", "old-render")
-        assert slot.manual_observed_at is None
+        assert slot.manual_observed_at is slot.retained_offer_id is None
     engine.dispose()

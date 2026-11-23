@@ -10,6 +10,7 @@ import "./dashboards.css";
 
 const emptyConfig: DashboardConfig = { name: "", grid: { cols: 4, rows: 2 }, widgets: [] };
 type PhotoOverlay = { device_uid: string; dashboard_id: string | null };
+export type DashboardDraft = { dashboard: DashboardRecord | null; config: DashboardConfig; tile: Tile };
 
 function dashboardError(reason: unknown, fallback: string) {
   if (!(reason instanceof Error)) return fallback;
@@ -22,12 +23,14 @@ function dashboardError(reason: unknown, fallback: string) {
   return reason.message;
 }
 
-export function DashboardsPage() {
+export function DashboardsPage({ draft, onDraftChange }: {
+  draft: DashboardDraft | null; onDraftChange: (value: DashboardDraft | null) => void;
+}) {
   const [items, setItems] = useState<DashboardRecord[]>([]);
   const [devices, setDevices] = useState<DeviceRecord[]>([]);
-  const [active, setActive] = useState<DashboardRecord | null>(null);
-  const [editing, setEditing] = useState(false);
-  const [dirty, setDirty] = useState(false);
+  const [restored, setRestored] = useState(draft);
+  const [active, setActive] = useState<DashboardRecord | null>(draft?.dashboard ?? null);
+  const [editing, setEditing] = useState(Boolean(draft));
   const [ready, setReady] = useState(false);
   const [error, setError] = useState("");
   const [message, setMessage] = useState("");
@@ -53,9 +56,10 @@ export function DashboardsPage() {
   }, []);
 
   const open = (dashboard: DashboardRecord | null) => {
-    if (dirty && !window.confirm("Discard unsaved changes and open another dashboard?")) return;
+    if (draft && !window.confirm("Discard unsaved changes and open another dashboard?")) return;
     setMessage("");
-    setDirty(false);
+    onDraftChange(null);
+    setRestored(null);
     setActive(dashboard);
     setEditing(true);
     window.requestAnimationFrame(() => editorHeading.current?.focus());
@@ -63,7 +67,8 @@ export function DashboardsPage() {
 
   const close = () => {
     setEditing(false);
-    setDirty(false);
+    onDraftChange(null);
+    setRestored(null);
     window.requestAnimationFrame(() => newButton.current?.focus());
   };
 
@@ -71,6 +76,8 @@ export function DashboardsPage() {
     setItems((previous) => previous.some((item) => item.id === dashboard.id)
       ? previous.map((item) => item.id === dashboard.id ? dashboard : item) : [...previous, dashboard]);
     setActive(dashboard);
+    setRestored(null);
+    onDraftChange(null);
     setMessage(`${dashboard.name} saved.`);
     if (!active) window.requestAnimationFrame(() => editorHeading.current?.focus());
   };
@@ -129,7 +136,7 @@ export function DashboardsPage() {
         {!items.length && !error && <p className="dd-hint">{ready ? "No dashboards yet." : "Loading dashboards…"}</p>}
       </section>
       {editing ? <DashboardEditor key={active?.id ?? "new"} dashboard={active} devices={devices} heading={editorHeading} onSave={saved}
-        onDelete={remove} onDirty={setDirty} onClose={close} /> : <section className="dd-empty workflow-panel">
+        onDelete={remove} restored={restored} onDraftChange={onDraftChange} onClose={close} /> : <section className="dd-empty workflow-panel">
         <h2>What’s on your display?</h2>
         <p>Open a saved dashboard or start with a layout you can make your own.</p>
         <button className="secondary-button" onClick={() => open(null)}>Create a dashboard</button>
@@ -206,18 +213,19 @@ function PhotoOverlaySettings({ devices, dashboards }: { devices: DeviceRecord[]
   </section>;
 }
 
-function DashboardEditor({ dashboard, devices, heading, onSave, onDelete, onDirty, onClose }: {
+function DashboardEditor({ dashboard, devices, heading, onSave, onDelete, restored, onDraftChange, onClose }: {
   dashboard: DashboardRecord | null;
   devices: DeviceRecord[];
   heading: React.RefObject<HTMLHeadingElement | null>;
   onSave: (record: DashboardRecord) => void;
   onDelete: (record: DashboardRecord) => Promise<void>;
-  onDirty: (dirty: boolean) => void;
+  restored: DashboardDraft | null;
+  onDraftChange: (value: DashboardDraft | null) => void;
   onClose: () => void;
 }) {
   const savedConfig = dashboard ? { ...dashboard.config, name: dashboard.name } : emptyConfig;
-  const [draft, setDraft] = useState<DashboardConfig>(savedConfig);
-  const [tile, setTile] = useState<Tile>(tiles[0]);
+  const [draft, setDraft] = useState<DashboardConfig>(restored?.config ?? savedConfig);
+  const [tile, setTile] = useState<Tile>(restored?.tile ?? tiles[0]);
   const [previewUrl, setPreviewUrl] = useState<string | null>(null);
   const [chosenDevice, setChosenDevice] = useState<string>();
   const [previewMode, setPreviewMode] = useState<"dashboard" | "photo">("dashboard");
@@ -238,7 +246,9 @@ function DashboardEditor({ dashboard, devices, heading, onSave, onDelete, onDirt
   const photoId = chosenPhoto ?? photos[0]?.id;
   const previewPhoto = previewMode === "photo" ? photos.find((photo) => photo.id === photoId) : undefined;
 
-  useEffect(() => onDirty(dirty), [dirty, onDirty]);
+  useEffect(() => {
+    onDraftChange(dirty ? { dashboard, config: draft, tile } : null);
+  }, [dirty, dashboard, draft, tile, onDraftChange]);
   useEffect(() => {
     if (!previewUrl) return;
     previewPanel.current?.focus();

@@ -334,6 +334,10 @@ def refresh_playback_slots(
 
 
 def _slot_already_offered(db: Session, slot: PlaybackSlot) -> bool:
+    # A scheduled repeat can keep the artwork from an earlier confirmed offer.
+    # Freeze that decision for this slot just as we freeze content already sent.
+    if slot.retained_offer_id is not None:
+        return True
     offered = db.scalar(
         select(PlaybackOffer.id)
         .where(
@@ -418,7 +422,7 @@ def _prepare_slot(
         version = (source.type, source.id, title, config, [asdict(widget) for widget in widgets])
         if repair_frame is not None and slot is not None and manual_requested_at is None:
             if slot.render_key != _render_key(version):
-                for render_version in ("previous", "legacy"):
+                for render_version in ("dev20", "previous", "legacy"):
                     historical_widgets = resolve_widget_text(
                         db, config, timestamp, device, observed_at=observed_at, render_version=render_version,
                     )
@@ -480,6 +484,7 @@ def _prepare_slot(
     slot.title = title
     slot.frame_id = frame.frame_id
     slot.render_key = render_key
+    slot.retained_offer_id = None
     slot.photo_render_json = (
         json.dumps({"processed_path": photo.processed_path, "overlay": overlay_snapshot})
         if photo and photo_metadata else None

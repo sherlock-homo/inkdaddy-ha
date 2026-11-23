@@ -213,6 +213,7 @@ class PlaybackSlot(Base):
     title: Mapped[str] = mapped_column(String(255), nullable=False)
     frame_id: Mapped[str] = mapped_column(ForeignKey("frames.frame_id"), index=True, nullable=False)
     render_key: Mapped[str] = mapped_column(String(64), nullable=False)
+    retained_offer_id: Mapped[int | None] = mapped_column(Integer)
     manual_observed_at: Mapped[datetime | None] = mapped_column(DateTime)
     photo_render_json: Mapped[str | None] = mapped_column(Text)
 

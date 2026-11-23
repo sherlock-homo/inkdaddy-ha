@@ -3,7 +3,7 @@ import { Shell } from "./components/Shell";
 import { apiJson } from "./lib/api";
 import type { PlaybackSource, RouteKey } from "./lib/types";
 import { Connect } from "./pages/Connect";
-import { DashboardsPage } from "./pages/Dashboards";
+import { DashboardsPage, type DashboardDraft } from "./pages/Dashboards";
 import { DevicesPage } from "./pages/Devices";
 import { HomeAssistantPage } from "./pages/HomeAssistant";
 import { Home } from "./pages/Home";
@@ -32,6 +32,8 @@ function routeFromHash(): RouteKey {
 export function App() {
   const [displayUid, setDisplayUid] = useState("");
   const [playlistSource, setPlaylistSource] = useState<PlaybackSource | null>(null);
+  const [dashboardDraft, setDashboardDraft] = useState<DashboardDraft | null>(null);
+  const hasDashboardDraft = dashboardDraft !== null;
   const [route, setRouteState] = useState<RouteKey>(routeFromHash);
   const [health, setHealth] = useState<"loading" | "ok" | "offline">("loading");
 
@@ -59,6 +61,16 @@ export function App() {
     return () => window.removeEventListener("hashchange", onHashChange);
   }, []);
 
+  useEffect(() => {
+    if (!hasDashboardDraft) return;
+    const warnBeforeLeaving = (event: BeforeUnloadEvent) => {
+      event.preventDefault();
+      event.returnValue = true;
+    };
+    window.addEventListener("beforeunload", warnBeforeLeaving);
+    return () => window.removeEventListener("beforeunload", warnBeforeLeaving);
+  }, [hasDashboardDraft]);
+
   return (
     <Shell activeRoute={route} onNavigate={setRoute}>
       <div className="top-strip">
@@ -74,7 +86,7 @@ export function App() {
       />}
       {route === "connect" && <Connect onOpenDisplay={openDisplay} />}
       {route === "photos" && <PhotosPage onAddToPlaylist={(source) => openDisplay(undefined, source)} />}
-      {route === "dashboards" && <DashboardsPage />}
+      {route === "dashboards" && <DashboardsPage draft={dashboardDraft} onDraftChange={setDashboardDraft} />}
       {route === "integrations" && <IntegrationsPage />}
       {route === "devices" && <DevicesPage onConnect={() => setRoute("connect")} onOpenDisplay={openDisplay} />}
       {route === "home-assistant" && <HomeAssistantPage />}

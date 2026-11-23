@@ -256,6 +256,7 @@ def test_pickup_validates_full_queue_before_saving(tmp_path, bridge, monkeypatch
 def test_private_queue_rejects_public_or_linked_directory(tmp_path, bridge):
     exposed = tmp_path / "exposed"
     exposed.mkdir(mode=0o755)
+    exposed.chmod(0o755)  # Exercise a public directory even under an owner-only process umask.
     with pytest.raises(ValueError, match="queue directory"):
         bridge.add_requests(exposed / "review.sqlite", [wire.request_data("Matter")], rate_limit=False)
     assert not (exposed / "review.sqlite").exists()

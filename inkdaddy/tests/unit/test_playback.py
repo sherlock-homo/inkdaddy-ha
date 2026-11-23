@@ -337,7 +337,7 @@ def test_sample_weather_uses_first_available_provider(catalog):
     config = dashboard_config(None)
     clock, weather, *_ = resolve_widget_text(db, config, NOW + timedelta(hours=4), device, observed_at=NOW)
     assert (weather.value, weather.detail) == ("Partly cloudy", "71 °F")
-    assert clock.detail.startswith("For ")
+    assert clock.detail == "Scheduled Wed, Nov 18"
     assert clock.value == "20:45"
     assert resolve_widget_text(db, config, NOW, device, observed_at=NOW + timedelta(minutes=61))[1].value == "Unavailable"
 
@@ -406,7 +406,7 @@ def test_paused_manual_dashboard_refresh_uses_new_date_and_repairs_exact_bitmap(
         assert frame_path.read_bytes() == exact
 
 
-@pytest.mark.parametrize("render_version", ["previous", "legacy"])
+@pytest.mark.parametrize("render_version", ["dev20", "previous", "legacy"])
 def test_existing_dashboard_offer_keeps_its_original_bitmap_after_clock_update(catalog, render_version):
     db, device, _photo = catalog
     device.battery_percent = 84
@@ -414,6 +414,9 @@ def test_existing_dashboard_offer_keeps_its_original_bitmap_after_clock_update(c
     timestamp = NOW.replace(minute=0)
     config = dashboard_config(None)
     widgets = resolve_widget_text(db, config, timestamp, device, render_version=render_version)
+    if render_version == "dev20":
+        assert widgets[0].detail == "For Wed, Nov 18"
+        assert widgets[3].detail == "Last reported"
     image = playback.render_dashboard(config, widgets)
     exact, sha = raw_frame_from_image(image, dither=True)
     frame = playback._store_frame(db, exact, image, playback.Source("dashboard", "sample"))
@@ -638,6 +641,69 @@ def test_manual_refresh_replaces_confirmed_transfer_with_same_bitmap(catalog):
     assert refresh.payload == initial.payload
     assert refresh.transfer_id != initial.transfer_id
     assert not refresh.acknowledged
+
+
+def test_scheduled_repeat_keeps_exact_receipt_and_manual_refresh_still_sends(catalog):
+    from inkdaddy_hub.models import PlaybackOffer
+    from inkdaddy_hub.services.matter_frame_broker import load_matter_frame_payload
+
+    db, device, photo = catalog
+    update_playlist(db, device, [{"type": "photo", "id": str(photo.id)}], NOW)
+    initial = prepare_matter_frame(db, device.device_uid, now=NOW)
+    assert record_matter_frame_receipt(
+        db, device.device_uid, transfer_id=initial.transfer_id, frame_id=initial.frame_id, result="ok", now=NOW,
+    )
+    first_confirmed = playback_status(db, device, NOW)["current"]
+    db.commit()
+
+    later = NOW + timedelta(hours=24)
+    with Session(db.bind, autoflush=False) as reopened:
+        screen = reopened.get(Device, device.id)
+        refresh_playback_slots(reopened, screen, now=later)
+        kept = prepare_matter_frame(reopened, screen.device_uid, now=later, include_payload=False)
+        assert kept.acknowledged and kept.payload is None
+        assert (kept.transfer_id, kept.scheduled_at) == (initial.transfer_id, initial.scheduled_at)
+        prune_playback(reopened, later)
+        reopened.commit()
+
+    with Session(db.bind, autoflush=False) as restarted:
+        screen = restarted.get(Device, device.id)
+        assert prepare_matter_frame(restarted, screen.device_uid, now=later, include_payload=False) == kept
+        assert load_matter_frame_payload(restarted, screen, kept) == initial.payload
+        assert len(restarted.scalars(select(PlaybackOffer)).all()) == 1
+        assert len(restarted.scalars(select(DeviceStatusHistory)).all()) == 1
+        assert screen.last_seen_at == NOW.replace(tzinfo=None)
+        status = playback_status(restarted, screen, later)
+        assert status["current"] == first_confirmed and status["pending"] is None
+        assert len(status["upcoming"]) == 5
+        assert status["upcoming"][0]["scheduled_at"] == (later.replace(minute=0) + timedelta(hours=1)).isoformat()
+        apply_playback_action(restarted, screen, "refresh_current", later)
+        fresh = prepare_matter_frame(restarted, screen.device_uid, now=later)
+        assert not fresh.acknowledged and fresh.transfer_id != initial.transfer_id
+        assert fresh.payload == initial.payload
+
+
+def test_retained_slot_freezes_until_due_and_keeps_pending_transfers_unconfirmed(catalog):
+    db, device, photo = catalog
+    update_playlist(db, device, [{"type": "photo", "id": str(photo.id)}], NOW)
+    initial = prepare_matter_frame(db, device.device_uid, now=NOW)
+    later = NOW + timedelta(hours=1)
+    pending = prepare_matter_frame(db, device.device_uid, now=later)
+    assert pending.sha256 == initial.sha256 and pending.transfer_id != initial.transfer_id
+    assert not pending.acknowledged
+    assert not record_matter_frame_receipt(
+        db, device.device_uid, transfer_id=initial.transfer_id, frame_id=initial.frame_id, result="ok",
+    )
+    assert record_matter_frame_receipt(
+        db, device.device_uid, transfer_id=pending.transfer_id, frame_id=pending.frame_id, result="ok", now=later,
+    )
+    retained_at = later + timedelta(hours=1)
+    assert prepare_matter_frame(db, device.device_uid, now=retained_at).transfer_id == pending.transfer_id
+    Image.new("RGB", (800, 480), "blue").save(photo.processed_path)
+    refresh_playback_slots(db, device, now=retained_at)
+    assert prepare_matter_frame(db, device.device_uid, now=retained_at).transfer_id == pending.transfer_id
+    replacement = prepare_matter_frame(db, device.device_uid, now=retained_at + timedelta(hours=1))
+    assert replacement.sha256 != pending.sha256 and not replacement.acknowledged
 
 
 @pytest.mark.parametrize("damage", ["truncated", "wrong_byte", "extra_bytes"])

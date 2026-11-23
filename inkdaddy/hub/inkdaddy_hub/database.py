@@ -6,7 +6,7 @@ from datetime import datetime, timezone
 from .config import get_settings
 
 try:
-    from sqlalchemy import create_engine, delete, inspect, select, update
+    from sqlalchemy import column, create_engine, delete, inspect, select, table as sql_table, update
     from sqlalchemy.orm import DeclarativeBase, Session, sessionmaker
 except ModuleNotFoundError as exc:  # pragma: no cover - exercised before deps are installed
     raise RuntimeError(
@@ -44,6 +44,7 @@ def init_db() -> None:
                 "first_new_interval_minute": "INTEGER",
             },
             "playback_slots": {
+                "retained_offer_id": "INTEGER",
                 "manual_observed_at": "TIMESTAMP",
                 "photo_render_json": "TEXT",
             },
@@ -65,8 +66,10 @@ def init_db() -> None:
                 if old in columns:
                     connection.exec_driver_sql(f"ALTER TABLE {table} RENAME COLUMN {old} TO {new}")
                     # Negate first to avoid transient collisions in a composite primary key.
-                    connection.exec_driver_sql(f"UPDATE {table} SET {new} = -60 * {new}")
-                    connection.exec_driver_sql(f"UPDATE {table} SET {new} = -{new}")
+                    renamed_table = sql_table(table, column(new))
+                    minutes = renamed_table.c[new]
+                    connection.execute(renamed_table.update().values({minutes: minutes * -60}))
+                    connection.execute(renamed_table.update().values({minutes: -minutes}))
                 elif new not in columns:
                     connection.exec_driver_sql(f"ALTER TABLE {table} ADD COLUMN {new} INTEGER")
         if hourly_upgrade:

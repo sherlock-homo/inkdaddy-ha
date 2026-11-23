@@ -559,7 +559,7 @@ widgets:
 @pytest.mark.parametrize("peer", [3], indirect=True, ids=["revision-3-palette"])
 def test_palette_photo_to_case_bdx_and_display_receipt(peer, app_catalog, monkeypatch):
     software, ready = peer
-    client, sessions, _clock = app_catalog
+    client, sessions, clock = app_catalog
     controller = MatterController(ready["port"], ready["token"])
     monkeypatch.setenv("INKDADDY_MATTER_PORT", str(ready["port"]))
     monkeypatch.setenv("INKDADDY_MATTER_TOKEN", ready["token"])
@@ -598,6 +598,22 @@ def test_palette_photo_to_case_bdx_and_display_receipt(peer, app_catalog, monkey
     assert response_json(client.get(route))["current"] is None
     finish_display(software, controller, device_id, target, attempt, now=1_005)
     assert response_json(client.get(route))["current"] == pending
+
+    clock.now += timedelta(hours=1)
+    worker.run_playback_cycle(now=clock.now)
+    assert matter_delivery.deliver_frame(controller, device_id, target, None, now=4_600) is None
+    assert software.call("counts") == {"acceptance_count": 1, "receipt_reads": 0}
+    status = response_json(client.get(route))
+    assert status["current"] == pending and status["pending"] is None
+    assert len(status["upcoming"]) == 5
+    with sessions() as db:
+        playback.apply_playback_action(db, db.get(Device, device_id), "refresh_current", clock.now)
+        db.commit()
+    forced = matter_delivery.deliver_frame(controller, device_id, target, None, now=4_603)
+    assert forced is not None and forced.transfer_id != attempt.transfer_id
+    assert expect_download(software, forced.transfer_id, expected, packing=2) == checksum
+    finish_display(software, controller, device_id, target, forced, now=4_608)
+    assert software.call("counts") == {"acceptance_count": 2, "receipt_reads": 0}
 
 
 def response_json(response):
