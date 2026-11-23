@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import http.client
+from hashlib import sha256
 import importlib.util
 import json
 import socket
@@ -337,6 +338,7 @@ def test_development_and_review_use_approved_data_and_separate_sandboxes(tmp_pat
     old_source.write_text("print('unchanged')\n")
     fake = tmp_path / "fake-codex"
     fake.write_text(f"#!{sys.executable}\n" + """import json
+from hashlib import sha256
 import os
 import sys
 from pathlib import Path
@@ -365,7 +367,8 @@ else:
     patch = (workspace / "proposed.patch").read_text()
     assert "print('proposed')" in patch and "enabled = True" in patch
     assert "integration-request.json" not in patch and "proposed.patch" not in patch
-report.write_text(mode + "\\n")
+digest = sha256((workspace / "proposed.patch").read_bytes()).hexdigest() if mode == "read-only" else ""
+report.write_text(mode + "\\n" + (digest + "\\n" if digest else ""))
 """)
     fake.chmod(0o700)
     monkeypatch.setenv(delivery.TOKEN_ENV, INGEST)
@@ -375,7 +378,27 @@ report.write_text(mode + "\\n")
     review.develop_and_review(manifest, source, revision, output)
     assert old_source.read_text() == "print('unchanged')\n"
     assert (output / "development.txt").read_text() == "workspace-write\n"
-    assert (output / "review.txt").read_text() == "read-only\n"
+    patch_path = output / "review" / "proposed.patch"
+    proposed = patch_path.read_bytes()
+    digest = sha256(proposed).hexdigest()
+    report = output / "review.txt"
+    assert report.read_text() == f"read-only\n{digest}\n"
+    for contents in ("Missing patch.", "Read file.\n" + "0" * 64):
+        report.write_text(contents)
+        with pytest.raises(ValueError, match="exact proposed patch"):
+            review.verify_review_report(report, patch_path, proposed)
+    report.write_text(f"**Patch SHA256**\n`{digest}`\n")
+    with pytest.raises(ValueError, match="written assessment"):
+        review.verify_review_report(report, patch_path, proposed)
+    report.write_text(f"**Patch SHA256**\n`{digest}`\nThe change updates example.py.")
+    review.verify_review_report(report, patch_path, proposed)
+    report.write_text(f"**Patch digest**: `{digest}`\nThe change updates example.py.")
+    review.verify_review_report(report, patch_path, proposed)
+    patch_path.write_bytes(b"")
+    with pytest.raises(ValueError, match="changed during review"):
+        review.verify_review_report(report, patch_path, proposed)
+    report.write_text(f"**Patch digest**: `{sha256(b'').hexdigest()}`\nThe integration is already present.")
+    review.verify_review_report(report, patch_path, b"")
 
     bridge.decide(queue, request.integration_id, "declined")
     saved = tmp_path / "saved-handoff.json"

@@ -2,8 +2,8 @@
 
 ## V1 follow-up
 
-- [ ] Composite transparent uploads onto panel white before Intelligent Crop and photo conversion. Check editor previews, saved raw frames and existing receipts.
-- [ ] Verify the transparent-photo fix in the packaged app and release it through the Home Assistant Apps repository.
+- [x] Composite transparent uploads onto panel white before Intelligent Crop and photo conversion. Check editor previews, saved raw frames and existing receipts.
+- [x] Verify the transparent-photo fix in the packaged app and release it through the Home Assistant Apps repository.
 - [x] Keep the last confirmed pixels on the panel when a scheduled slot repeats the same photo. Verify that manual refresh still sends, that changed artwork still sends, and that a restart preserves the receipt.
 - [x] Label scheduled dashboard clocks clearly even when the owner gives the widget a custom title. Verify the editor's behavior when navigating with unsaved changes.
 - [x] Show the installed app’s native update page, release and auto-update status, plus registered displays’ reported firmware. Verify recovery when Supervisor details are unavailable and refresh the app entry page after upgrades.
@@ -11,6 +11,10 @@
 - [x] Verify the new store version through live Home Assistant Ingress, observe a scheduled repeat, then request a fresh receipt for the same photo.
 
 The dev.21 Mac test suite passed 214 Python tests and six Node tests. The amd64 package passed 213 Python tests and six Node tests, including an authenticated Matter transfer after an explicit refresh. In a 24-hour one-photo schedule the hub skipped all 24 repeated transfers and kept the original receipt. The renderer reproduced all five reference bitmaps. Package browser checks covered the no-code editor at 390 and 1100 px, the update links, and the cached shell upgrade. Gitleaks scans of the source, history and packaged app found zero secrets. Bandit reported zero medium or high findings, and the Python and npm dependency audits reported zero known vulnerabilities.
+
+Dev.22 passed 248 Python and six Node tests on the Mac and in the amd64 app package. A 390 px browser saved a dev.21 transparent original at its existing crop and verified both the old and corrected raw frame. In a 12-megapixel synthetic benchmark the corrected frame matched an opaque white-backed reference byte for byte. Home Assistant backed up and updated the installed app. Its Python, frontend and controller matched the tested package, and the upgrade preserved the library, device preferences, pairing, receipt, dashboard and five upcoming frames. Source, history and packaged application secret scans found zero secrets. Bandit found zero medium or high issues.
+
+Native ARM64 Linux passed 247 Python and six Node tests on the published dev.22 source, including authenticated Matter transfer and a managed app upload with exact 800 × 480 preview and raw pixel checks. The offline ARM64 guest lacked Git for one owner-tool test covered on amd64. The stock ARM64 Home Assistant OS store-install check was last completed on dev.21.
 
 Home Assistant backed up the installed app and updated it to dev.21 through Apps on amd64. The installed Python, Matter controller and frontend files matched the tested build. The upgrade preserved the existing binding, library, dashboard, playback receipt and scheduled slots. On November 23 at 12:00 UTC the scheduler kept the confirmed photo on screen, retained the 11:01 UTC receipt and prepared five more slots. An explicit refresh then received a new authenticated receipt for the same frame after 83.7 seconds. All five upcoming frames kept their order. Power source and physical current were unverified.
 
@@ -27,9 +31,13 @@ An isolated native ARM64 Linux guest passed 213 Python and six Node tests. Stock
 - [x] Implement dispatch of owner-approved requests to a developer and independent reviewer. Preserve reports across restarts and prevent duplicate runs.
 - [x] Test the queue, notification delivery state, dispatcher, permissions and upgrade behavior with synthetic requests. Check the installed Mac service without adding a fake request to the owner's inbox.
 - [ ] Verify the configured public HTTPS endpoint from Home Assistant, Mac mini receipt and a visible owner notification.
-- [ ] Provision the isolated Codex worker and verify development and independent review of a real owner-approved request.
+- [x] Provision an isolated worker on the Mac mini with local inference, a reviewed source revision and separate production and test queues.
+- [x] Make the public review launcher verify that the review report identifies the exact retained patch.
+- [ ] Verify development and independent review of a real owner-approved integration request.
 
 The owner tools passed the Mac suite of 230 Python and six Node tests. An isolated HA app sent a synthetic request over certificate-validated HTTPS, and a second pickup kept a single pending entry. The installed Mac relay answered an authenticated request on loopback. Both launchd jobs loaded, the empty-inbox notification check exited successfully, and a repeat installation preserved the queue and credentials. The dispatcher produced a patch and a separate review report using stand-in agent processes. Gitleaks found zero secrets in the staged source and reachable history, and Bandit found zero medium or high issues.
+
+A subsequent worker test used two independent sessions of a real local model. The isolated fixture completed in 117 seconds. The developer proposed a one-file patch and the reviewer described the mapping and identified the exact retained diff. In a fresh offline checkout the regression test failed before applying the patch and passed afterward. The Mac login service recovered after a cold stop of the guest. The live queues were empty at verification. Failed attempts retain their reports for owner inspection and explicit retry.
 
 The dev.20 local suite passed 208 Python tests, including authenticated loopback Matter delivery at a shortened interval, and six controller tests. The amd64 Home Assistant package passed 207 Python tests and six controller tests. The Mac mini runner’s Git test passed on the Mac. The packaged migration from dev.19 preserved the original photo digest, the confirmed transfer, and five scheduled frames. Chromium verified the 390–393 px photo, overlay, interval, and request workflows. The reviews covered cadence changes, exact bitmap recovery, relay data and acknowledgment, and the Mac mini runner’s Git and sandbox isolation. Gitleaks found no secrets in the source, reachable history, or packaged application files. Bandit reported no medium or high findings.
 
@@ -59,8 +67,11 @@ The dev.20 local suite passed 208 Python tests, including authenticated loopback
 
 - [x] Compare six-color image rendering on synthetic portraits, skin tones, smooth gradients and dark detail. Keep vector text and widget borders clear. Test the chosen renderer on the exact 800 × 480 panel format and record render time, transfer bytes and output checksums.
 - [x] Review worker, renderer and Matter performance. Keep the five-frame cache bounded, avoid repeated expensive work, and verify refresh timing and manual response after an idle period.
-- [ ] Review battery behavior separately from server polling. Verify the LiPo-only refresh, measure idle and refresh current at the battery connection, and check Thread reception at the final mounting spot.
-- [ ] Verify a clean device's QR-to-default-dashboard run and the four playback controls in Apple Home when an iPhone or unlocked Mirroring session is available. Verify platform limits on artwork separately.
+- [ ] Verify an authenticated refresh with the frame running solely from its LiPo.
+- [ ] Measure idle and refresh current at the battery connection.
+- [ ] Verify Thread reception and a confirmed frame at the final mounting spot.
+- [ ] Verify a clean device's QR-to-default-dashboard run.
+- [ ] Verify playback controls and artwork visibility in Apple Home. The signed-in Mac Home app showed the owner's rooms but did not list the frame during the November 23 check.
 - [x] Independently review authentication, authorization, in-memory and persisted credential use, transport, file access and package dependencies. Scan the final Git tree, history, and package for secrets. Re-run integration and browser checks against the same build before publishing the V1 candidate.
 
 ### V1 candidate benchmarks

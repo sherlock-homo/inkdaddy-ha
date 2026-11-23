@@ -87,6 +87,8 @@ Codex CLI must already be provisioned in that development environment. The launc
 
 Read the local `development.txt` and `review.txt` reports alongside `review/proposed.patch`. The owner controls whether and how to move the resulting changes into a real project. Publishing and deployment require separate owner action.
 
+The reviewer computes the SHA-256 digest of the patch it reads. The launcher compares that digest to the proposed bytes, checks the retained file, and requires a written assessment. Inspect the review and tests to judge whether the proposed change is ready to use.
+
 ## Run approved work automatically
 
 In the dedicated worker, keep one private review database outside the source checkout. Import requests into that queue and run `decide` there. Pickup transfers the request ID and name. The approval belongs to the queue where the owner records it. Keep that database across restarts so it can remember previous attempts.
