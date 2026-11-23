@@ -21,10 +21,13 @@ An isolated native ARM64 Linux guest passed 213 Python and six Node tests. Stock
 - [x] Make the refresh interval configurable per display. Preserve installed playback state, confirmed frames, and the five-frame queue.
 - [x] Add anonymous integration requests and a private relay with a durable queue. Provide a Mac mini workflow for development and independent review.
 - [x] Exercise an upgrade from the existing app, test the photo and overlay editor in the browser, verify the schedule and integration request flow, and review the release contents for sensitive data.
-- [ ] Install the private Mac mini relay and notify the owner when a new request arrives. Keep request names and device metadata out of desktop notifications.
-- [ ] Automatically dispatch owner-approved requests to a developer and independent reviewer inside a provisioned worker. Preserve review results across restarts and prevent duplicate runs.
-- [ ] Verify the owner-side queue, notification delivery state, dispatcher, permissions and upgrade behavior with synthetic requests. Check the installed Mac service without adding a fake request to the owner's inbox.
-- [ ] Verify delivery and Mac mini pickup against an owner-configured HTTPS relay and run an approved request in the isolated Codex environment.
+- [x] Install the private Mac mini relay and its five-minute notification job. Keep request names and device metadata out of desktop notifications.
+- [x] Implement dispatch of owner-approved requests to a developer and independent reviewer. Preserve reports across restarts and prevent duplicate runs.
+- [x] Test the queue, notification delivery state, dispatcher, permissions and upgrade behavior with synthetic requests. Check the installed Mac service without adding a fake request to the owner's inbox.
+- [ ] Verify the configured public HTTPS endpoint from Home Assistant, Mac mini receipt and a visible owner notification.
+- [ ] Provision the isolated Codex worker and verify development and independent review of a real owner-approved request.
+
+The owner tools passed the Mac suite of 230 Python and six Node tests. An isolated HA app sent a synthetic request over certificate-validated HTTPS, and a second pickup kept a single pending entry. The installed Mac relay answered an authenticated request on loopback. Both launchd jobs loaded, the empty-inbox notification check exited successfully, and a repeat installation preserved the queue and credentials. The dispatcher produced a patch and a separate review report using stand-in agent processes. Gitleaks found zero secrets in the staged source and reachable history, and Bandit found zero medium or high issues.
 
 The dev.20 local suite passed 208 Python tests, including authenticated loopback Matter delivery at a shortened interval, and six controller tests. The amd64 Home Assistant package passed 207 Python tests and six controller tests. The Mac mini runner’s Git test passed on the Mac. The packaged migration from dev.19 preserved the original photo digest, the confirmed transfer, and five scheduled frames. Chromium verified the 390–393 px photo, overlay, interval, and request workflows. The reviews covered cadence changes, exact bitmap recovery, relay data and acknowledgment, and the Mac mini runner’s Git and sandbox isolation. Gitleaks found no secrets in the source, reachable history, or packaged application files. Bandit reported no medium or high findings.
 
