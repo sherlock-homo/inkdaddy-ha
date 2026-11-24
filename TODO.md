@@ -4,8 +4,10 @@
 
 - [x] Read supported capture dates and locations from saved originals, including older uploads. Keep metadata local and handle missing, malformed, and oversized data.
 - [x] Add no-code overlay widgets for the capture date, elapsed years, and photo location. Use the selected photo for the preview and the scheduled photo for playback.
-- [ ] Test mixed albums, anniversaries, missing tags, original retention and privacy. Publish and verify the updated app in Home Assistant.
-- [ ] Publish the approved HTTPS request endpoint, configure the installed app, and verify delivery to the Mac mini inbox.
+- [x] Test mixed albums, anniversaries, missing tags, original retention and privacy. Publish and verify the updated app in Home Assistant.
+- [x] Publish the approved HTTPS request endpoint, configure the installed app, and verify delivery to the Mac mini inbox.
+
+Dev.23 passed 268 Python and six Node tests on the Mac and in the amd64 app image. In the mobile editor, tagged and untagged photos produced the expected previews for all three fields. A dev.22 library with identical photo pixels and different capture dates produced distinct overlays after upgrade. Home Assistant created a partial backup and installed the published app. The installed Python, frontend, and Matter controller matched the tested package. The original library photo produced three distinct 800 × 480 previews. The app preserved the binding, device preferences, dashboard, library, receipt, and scheduled slots. Source, history, and packaged app scans found zero secrets. Bandit reported zero medium or high findings.
 
 ## V1 follow-up
 
@@ -37,7 +39,8 @@ An isolated native ARM64 Linux guest passed 213 Python and six Node tests. Stock
 - [x] Install the private Mac mini relay and its five-minute notification job. Keep request names and device metadata out of desktop notifications.
 - [x] Implement dispatch of owner-approved requests to a developer and independent reviewer. Preserve reports across restarts and prevent duplicate runs.
 - [x] Test the queue, notification delivery state, dispatcher, permissions and upgrade behavior with synthetic requests. Check the installed Mac service without adding a fake request to the owner's inbox.
-- [ ] Verify the configured public HTTPS endpoint from Home Assistant, Mac mini receipt and a visible owner notification.
+- [x] Send a labeled request through the installed app and the public HTTPS endpoint. Match its ID in the Mac mini inbox and confirm Notification Center stored the notification. The test request was declined.
+- [ ] Confirm the owner sees a notification banner. macOS muted the acceptance-test banner.
 - [x] Provision an isolated worker on the Mac mini with local inference, a reviewed source revision and separate production and test queues.
 - [x] Make the public review launcher verify that the review report identifies the exact retained patch.
 - [ ] Verify development and independent review of a real owner-approved integration request.

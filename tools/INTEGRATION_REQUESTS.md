@@ -25,7 +25,7 @@ python3 tools/integration_request_bridge.py --db "$inkdaddy_review_dir/relay.sql
 
 ## Connect an installation to the owner relay
 
-Choose a public DNS name with a trusted HTTPS certificate. The app connects on port 443 and accepts the configured path directly. Configure its reverse proxy to forward POST and GET at `/v1/integration-requests` to the loopback relay, preserve the Authorization header, apply request and connection limits, and avoid logging headers, bodies, and sender addresses. The app keeps requests local until a relay URL and ingest token are configured.
+Choose a public DNS name with a trusted HTTPS certificate. The app connects on port 443 and accepts the configured path directly. When the owner inbox runs on the relay Mac, expose only POST at `/v1/integration-requests` through the public proxy. Keep inbox reads on loopback. If a separate machine collects the queue, give it a private route for authenticated GET. Preserve the Authorization header, apply request and connection limits, and omit headers, bodies, and sender addresses from proxy logs. The app keeps requests local until a relay URL and ingest token are configured.
 
 The Mac installer starts the relay and creates its credentials. For a separate host, create the private directory and credentials once, then start the relay there. The following first-run example uses shell noclobber to protect existing credentials.
 
