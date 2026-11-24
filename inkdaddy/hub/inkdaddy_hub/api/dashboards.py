@@ -4,7 +4,7 @@ import re
 from datetime import datetime, timezone
 from typing import Any
 
-from fastapi import APIRouter, Depends, HTTPException, Response
+from fastapi import APIRouter, Depends, HTTPException, Query, Response
 from PIL import Image
 from pydantic import BaseModel, Field
 from sqlalchemy import select
@@ -180,10 +180,11 @@ def delete_dashboard(dashboard_id: str, db: Session = Depends(get_db)) -> dict[s
 @router.get("/{dashboard_id}/preview")
 @router.post("/{dashboard_id}/preview")
 def preview_dashboard(
-    dashboard_id: str, device_uid: str | None = None, db: Session = Depends(get_db)
+    dashboard_id: str, device_uid: str | None = None, photo_id: int | None = Query(default=None, gt=0, le=2**63 - 1),
+    db: Session = Depends(get_db),
 ) -> Response:
     config = dashboard_config(_find(db, dashboard_id))
-    return _preview(db, config, device_uid)
+    return _preview(db, config, device_uid, photo_id)
 
 
 def _preview(db: Session, config: dict[str, Any], device_uid: str | None, photo_id: int | None = None) -> Response:
@@ -191,6 +192,7 @@ def _preview(db: Session, config: dict[str, Any], device_uid: str | None, photo_
         db.scalar(select(Device).where(Device.device_uid == device_uid)) if device_uid else None
     )
     image = None
+    photo = None
     if photo_id is not None:
         photo = db.get(Photo, photo_id)
         image = (
@@ -205,7 +207,7 @@ def _preview(db: Session, config: dict[str, Any], device_uid: str | None, photo_
     if requests := calendar_requests(config):
         connection, scope = calendar_connection(db)
         refresh_calendar_cache(connection, scope, requests, now)
-    widgets = resolve_widget_text(db, config, now, device, time_kind="preview")
+    widgets = resolve_widget_text(db, config, now, device, time_kind="preview", photo=photo)
     image = PhotoOverlay(config, widgets).render(image) if image else render_dashboard(config, widgets)
     return Response(
         content=render_preview_png_bytes(image), media_type="image/png", headers={"Cache-Control": "no-store"},

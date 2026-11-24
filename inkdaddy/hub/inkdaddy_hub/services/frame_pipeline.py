@@ -11,7 +11,7 @@ from sqlalchemy.orm import Session
 from ..config import get_settings
 from ..models import AlbumItem, Device, Frame, Photo
 from .asset_storage import asset_stat, write_asset
-from .dashboard_content import dashboard_config, get_dashboard_record, render_dashboard, resolve_widget_text
+from .dashboard_content import dashboard_config, get_dashboard_record, render_dashboard, resolve_photo_overlay, resolve_widget_text
 from .matter_onboarding import default_matter_onboarding_codes
 from .palette import WAVESHARE_7COLOR_6, raw_frame_from_image
 from .photos import load_color_managed_photo
@@ -78,7 +78,9 @@ def render_device_image(db: Session, device: Device, *, refresh_count: int) -> t
     if photo:
         image = load_color_managed_photo(get_settings().data_dir, photo.processed_path, photo.original_path)
         if image is not None:
-            return image, content_kind, f"photo-{photo.id}"
+            overlay = resolve_photo_overlay(db, device.overlay_dashboard_id, datetime.now(timezone.utc), device,
+                                            time_kind="manual", photo=photo)
+            return overlay.render(image) if overlay else image, content_kind, f"photo-{photo.id}"
     dashboard = get_dashboard_record(db, device.selected_source_id) if device.selected_source_type == "dashboard" else None
     config = dashboard_config(dashboard)
     widgets = resolve_widget_text(db, config, datetime.now(timezone.utc), device)

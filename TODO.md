@@ -1,5 +1,12 @@
 # inkDaddy Home Assistant repository checklist
 
+## Photo metadata overlays
+
+- [x] Read supported capture dates and locations from saved originals, including older uploads. Keep metadata local and handle missing, malformed, and oversized data.
+- [x] Add no-code overlay widgets for the capture date, elapsed years, and photo location. Use the selected photo for the preview and the scheduled photo for playback.
+- [ ] Test mixed albums, anniversaries, missing tags, original retention and privacy. Publish and verify the updated app in Home Assistant.
+- [ ] Publish the approved HTTPS request endpoint, configure the installed app, and verify delivery to the Mac mini inbox.
+
 ## V1 follow-up
 
 - [x] Composite transparent uploads onto panel white before Intelligent Crop and photo conversion. Check editor previews, saved raw frames and existing receipts.
@@ -67,7 +74,7 @@ The dev.20 local suite passed 208 Python tests, including authenticated loopback
 
 - [x] Compare six-color image rendering on synthetic portraits, skin tones, smooth gradients and dark detail. Keep vector text and widget borders clear. Test the chosen renderer on the exact 800 × 480 panel format and record render time, transfer bytes and output checksums.
 - [x] Review worker, renderer and Matter performance. Keep the five-frame cache bounded, avoid repeated expensive work, and verify refresh timing and manual response after an idle period.
-- [ ] Verify an authenticated refresh with the frame running solely from its LiPo.
+- [x] Verify an authenticated refresh on owner-confirmed battery power. On November 24 the display returned a fresh receipt after 123 seconds for the same photo and preserved all five upcoming frames.
 - [ ] Measure idle and refresh current at the battery connection.
 - [ ] Verify Thread reception and a confirmed frame at the final mounting spot.
 - [ ] Verify a clean device's QR-to-default-dashboard run.

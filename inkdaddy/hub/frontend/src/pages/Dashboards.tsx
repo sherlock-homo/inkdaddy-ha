@@ -228,7 +228,8 @@ function DashboardEditor({ dashboard, devices, heading, onSave, onDelete, restor
   const [tile, setTile] = useState<Tile>(restored?.tile ?? tiles[0]);
   const [previewUrl, setPreviewUrl] = useState<string | null>(null);
   const [chosenDevice, setChosenDevice] = useState<string>();
-  const [previewMode, setPreviewMode] = useState<"dashboard" | "photo">("dashboard");
+  const [previewMode, setPreviewMode] = useState<"dashboard" | "photo">(() =>
+    draft.widgets.some((item) => item.source?.type === "photo_metadata") ? "photo" : "dashboard");
   const [photos, setPhotos] = useState<PhotoRecord[]>([]);
   const [chosenPhoto, setChosenPhoto] = useState<string>();
   const [photoMessage, setPhotoMessage] = useState("");
@@ -292,6 +293,7 @@ function DashboardEditor({ dashboard, devices, heading, onSave, onDelete, restor
 
   const addWidget = (kind: WidgetKind) => {
     change({ ...draft, widgets: [...draft.widgets, createWidget(kind, tile, draft.widgets)] });
+    if (kind === "photo_metadata") setPreviewMode("photo");
     focusInspector();
   };
 

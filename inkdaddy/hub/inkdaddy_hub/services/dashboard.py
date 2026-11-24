@@ -14,6 +14,7 @@ GRID_ROWS = 2
 MAX_YAML_BYTES = 64 * 1024
 MAX_YAML_EVENTS = 4096
 MAX_YAML_DEPTH = 32
+PHOTO_METADATA_FIELDS = ("date_taken", "years_ago", "location")
 
 WIDGET_FOOTPRINTS: dict[str, set[tuple[int, int]]] = {
     "big_number": {(1, 1), (2, 1)},
@@ -155,6 +156,9 @@ def validate_widget(widget: dict[str, Any], *, index: int, cols: int, rows: int)
         normalized.setdefault(field, {})
         if not isinstance(normalized[field], dict):
             raise DashboardValidationError(f"Widget {widget_id} {field} must be a mapping.")
+    source = normalized["source"]
+    if source.get("type") == "photo_metadata" and source.get("field") not in PHOTO_METADATA_FIELDS:
+        raise DashboardValidationError("Choose a photo date, age, or location for the Photo details widget.")
     return normalized
 
 

@@ -1,3 +1,7 @@
+## 0.2.0-dev.23
+
+- Add **Photo details** to an overlay to show where or when the current photo was taken, or how many years have passed. Existing uploads use their saved originals. Preview a photo before assigning the overlay to a display.
+
 ## 0.2.0-dev.22
 
 - Transparent photos now use the panel’s white background in Intelligent Crop, the framing editor, and the finished image. Re-edit an existing photo to render it from its original.

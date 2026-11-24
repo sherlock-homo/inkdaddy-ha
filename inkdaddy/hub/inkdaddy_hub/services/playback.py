@@ -400,7 +400,7 @@ def _prepare_slot(
         )
         overlay = resolve_photo_overlay(
             db, device.overlay_dashboard_id, manual_requested_at or scheduled_time(scheduled_minute),
-            device, observed_at=observed_at,
+            device, photo=photo, observed_at=observed_at,
             time_kind="manual" if manual_requested_at is not None else "scheduled",
         )
         if overlay is not None:

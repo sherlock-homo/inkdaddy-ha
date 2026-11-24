@@ -12,10 +12,12 @@ from PIL import Image, ImageDraw
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-from ..models import Dashboard, Device, HAEntityCache, Setting
+from ..config import get_settings
+from ..models import Dashboard, Device, HAEntityCache, Photo, Setting
 from .dashboard import SAMPLE_DASHBOARD, load_dashboard_yaml, validate_dashboard_config
 from .dashboard_calendar import calendar_id, calendar_scope, upcoming_agenda
 from .dashboard_sensors import UNAVAILABLE_STATES, dashboard_eligible, entity_attributes
+from .photo_metadata import CaptureDetails, capture_details, photo_age
 from .rendering import _font
 
 SITE_SETTING = "home_assistant.site"
@@ -96,6 +98,7 @@ def resolve_photo_overlay(
     timestamp: datetime,
     device: Device | None,
     *,
+    photo: Photo | None = None,
     observed_at: datetime | None = None,
     time_kind: DashboardTimeKind = "scheduled",
 ) -> PhotoOverlay | None:
@@ -108,7 +111,7 @@ def resolve_photo_overlay(
     if not config["widgets"]:
         return None
     return PhotoOverlay(config, resolve_widget_text(db, config, timestamp, device, observed_at=observed_at,
-                                                    time_kind=time_kind))
+                                                    time_kind=time_kind, photo=photo))
 
 
 def resolve_widget_text(
@@ -117,6 +120,7 @@ def resolve_widget_text(
     timestamp: datetime,
     device: Device | None,
     *,
+    photo: Photo | None = None,
     observed_at: datetime | None = None,
     time_kind: DashboardTimeKind = "scheduled",
     render_version: DashboardRenderVersion = "current",
@@ -132,6 +136,13 @@ def resolve_widget_text(
     supports_overlay_widgets = render_version in ("current", "dev20")
     show_agenda = supports_overlay_widgets and any(w["source"].get("type") == "calendar" for w in config["widgets"])
     agenda_scope = calendar_scope(db) if show_agenda else None
+    details = CaptureDetails()
+    if photo is not None:
+        fields = [w["source"].get("field") for w in config["widgets"] if w["source"].get("type") == "photo_metadata"]
+        if fields:
+            details = capture_details(get_settings().data_dir, photo.original_path,
+                                      want_date="date_taken" in fields or "years_ago" in fields,
+                                      want_location="location" in fields)
     for widget in config["widgets"]:
         options = widget["options"]
         source = widget["source"]
@@ -163,6 +174,15 @@ def resolve_widget_text(
             else:
                 value = "Calendar unavailable" if rows is None else "No events in the next 24 hours"
                 widgets.append(AgendaText(label or "Upcoming events", value))
+        elif source_type == "photo_metadata" and render_version == "current":
+            field = source["field"]
+            if field == "location":
+                text = WidgetText(label or "Photo location", details.location or "Location unavailable")
+            elif field == "years_ago":
+                text = WidgetText(label or "Photo age", photo_age(details.taken, local.date()) if details.taken else "Date unavailable")
+            else:
+                text = WidgetText(label or "Date taken", details.taken.strftime("%b %d, %Y") if details.taken else "Date unavailable")
+            widgets.append(text)
         elif source_type == "location":
             zone = db.get(HAEntityCache, "zone.home")
             widgets.append(

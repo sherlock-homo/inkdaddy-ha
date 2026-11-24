@@ -5,6 +5,7 @@ import type { DashboardWidget, HAEntity } from "../lib/types";
 export const widgetKinds = {
   clock: { name: "Clock", subtitle: "Local time of a scheduled or requested refresh", symbol: "◷" },
   date: { name: "Date", subtitle: "Day and date of the frame", symbol: "▦" },
+  photo_metadata: { name: "Photo details", subtitle: "Date taken, years ago, or photo location", symbol: "▧" },
   calendar: { name: "Upcoming events", subtitle: "The next 24 hours on a Home Assistant calendar", symbol: "▤" },
   location: { name: "Location", subtitle: "Name and time zone of your home", symbol: "⌖" },
   weather: { name: "Weather", subtitle: "Current conditions from Home Assistant", symbol: "☁" },
@@ -14,6 +15,13 @@ export const widgetKinds = {
 } as const;
 
 export type WidgetKind = keyof typeof widgetKinds;
+const photoFields = { date_taken: "Date taken", years_ago: "Years ago", location: "Photo location" } as const;
+
+function photoField(widget: DashboardWidget): keyof typeof photoFields {
+  const field = widget.source?.field;
+  return field === "years_ago" || field === "location" ? field : "date_taken";
+}
+
 export type Tile = { x: number; y: number };
 type Span = readonly [number, number];
 export const tiles: Tile[] = Array.from({ length: 8 }, (_, i) => ({ x: i % 4, y: Math.floor(i / 4) }));
@@ -52,6 +60,7 @@ export function widgetTitle(widget: DashboardWidget) {
   const kind = widgetKind(widget);
   const label = displayText(widget.options?.label);
   if (label) return label;
+  if (kind === "photo_metadata") return photoFields[photoField(widget)];
   const entity = displayText(widget.source?.entity_id).split(".").at(-1)?.replaceAll("_", " ");
   if (entity) return entity[0].toUpperCase() + entity.slice(1);
   return kind ? widgetKinds[kind].name : widget.type.replaceAll("_", " ");
@@ -65,6 +74,9 @@ export function createWidget(kind: WidgetKind, tile: Tile, widgets: DashboardWid
   const type = kind === "calendar" ? "agenda" : kind === "text" ? "text_note" :
     kind === "weather" && fits(widgets, tile, 2, 1) ? "weather_summary" : "entity_state";
   const [w, h] = spans[type][0];
+  if (kind === "photo_metadata") {
+    return { ...tile, id, type, w, h, source: { type: kind, field: "date_taken" }, options: {} };
+  }
   const options = kind === "home_assistant" ? {} : { label: widgetKinds[kind].name };
   return { ...tile, id, type, w, h, options,
     source: kind === "text" ? {} : { type: kind } };
@@ -236,6 +248,15 @@ export function WidgetSettings({ widget, widgets, disabled, onChange, onRemove }
     .filter(([w, h]) => fits(widgets, widget, w, h, widget));
   const positions = tiles.filter((tile) => fits(widgets, tile, widget.w, widget.h, widget));
   return <div className="dd-widget-fields" aria-label="Widget settings">
+    {kind === "photo_metadata" && <>
+      <label>Photo detail<select aria-label="Photo detail" value={photoField(widget)} disabled={disabled}
+        onChange={(event) => onChange({ ...widget, source: { type: kind, field: event.target.value } })}>
+        {Object.entries(photoFields).map(([field, title]) => <option key={field} value={field}>{title}</option>)}
+      </select></label>
+      <p className="dd-hint">{photoField(widget) === "location"
+        ? "Shows the place name or approximate coordinates saved in each photo."
+        : "Uses the capture date saved in each photo."}</p>
+    </>}
     {(kind === "home_assistant" || kind === "weather") && <EntityPicker weather={kind === "weather"}
       selected={displayText(widget.source?.entity_id)} disabled={disabled}
       onChange={(entityId) => onChange({ ...widget, source: { ...widget.source, entity_id: entityId || undefined } })} />}
@@ -251,6 +272,7 @@ export function WidgetSettings({ widget, widgets, disabled, onChange, onRemove }
       <p className="dd-hint">Events appear as Busy unless you share their titles.</p>
     </>}
     <label>Label<input value={displayText(widget.options?.label)} maxLength={80} disabled={disabled}
+      placeholder={kind === "photo_metadata" ? photoFields[photoField(widget)] : undefined}
       onChange={(event) => onChange({ ...widget, options: { ...widget.options, label: event.target.value } })} /></label>
     {kind === "text" && <label>Text<textarea value={displayText(widget.options?.text)} maxLength={120} rows={2} disabled={disabled}
       onChange={(event) => onChange({ ...widget, options: { ...widget.options, text: event.target.value } })} /></label>}

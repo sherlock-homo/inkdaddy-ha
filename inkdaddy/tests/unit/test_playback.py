@@ -1022,3 +1022,46 @@ def test_repeated_photo_reuses_prepared_bytes_and_delivery_verifies_them(catalog
     refresh_playback_slots(db, device, now=later)
     assert len(conversions) == 4
     assert initial.frame_id not in {slot["frame_id"] for slot in playback_status(db, device, later)["upcoming"]}
+
+
+def test_scheduled_photo_age_uses_each_original_and_slot_local_date(catalog, tmp_path, monkeypatch):
+    from inkdaddy_hub.models import Setting
+    from inkdaddy_hub.services import dashboard_content
+
+    db, device, first = catalog
+    monkeypatch.setattr(dashboard_content, "get_settings", lambda: HubSettings(data_dir=tmp_path))
+    (tmp_path / "originals").mkdir()
+    second = Photo(original_filename="Second.jpg", stored_filename="two.jpg", processed_path=first.processed_path,
+                   processed_status="ready")
+    for photo, year in ((first, 2000), (second, 2010)):
+        path = tmp_path / "originals" / f"{year}.jpg"
+        photo.original_path = str(path)
+        tags = Image.Exif()
+        tags[34665] = {36867: f"{year}:11:18 20:01:02"}
+        tags[315] = "Excluded private field"
+        Image.new("RGB", (16, 10), "white").save(path, exif=tags)
+    config = {"name": "Photo age", "widgets": [{
+        "id": "ago", "type": "entity_state", "x": 0, "y": 0, "w": 1, "h": 1,
+        "source": {"type": "photo_metadata", "field": "years_ago"},
+    }]}
+    db.add_all([second, Setting(key=dashboard_content.SITE_SETTING, value_json='{"time_zone":"America/New_York"}'),
+                Dashboard(slug="age", name="Photo age", current_yaml=json.dumps(config))])
+    device.overlay_dashboard_id = "age"
+    db.flush()
+    when = NOW.replace(hour=4, minute=0)
+    update_playlist(db, device, [{"type": "photo", "id": str(p.id)} for p in (first, second)], when)
+    offer = prepare_matter_frame(db, device.device_uid, now=when)
+    refresh_playback_slots(db, device, now=when)
+    slots = db.scalars(select(PlaybackSlot).where(PlaybackSlot.device_id == device.id)
+                       .order_by(PlaybackSlot.scheduled_minute)).all()
+    assert [json.loads(s.photo_render_json)["overlay"][0]["text"]["value"] for s in slots[:3]] == [
+        "25 years ago", "16 years ago", "26 years ago",
+    ]
+    assert all("Excluded private field" not in s.photo_render_json for s in slots)
+    # Repair an already offered photo after its original or settings disappear.
+    Path(first.original_path).unlink()
+    device.overlay_dashboard_id = None
+    frame = db.scalar(select(Frame).where(Frame.frame_id == offer.frame_id))
+    Path(frame.path).unlink()
+    db.commit()
+    assert prepare_matter_frame(db, device.device_uid, now=when, repair_cache=True) == offer
