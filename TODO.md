@@ -3,9 +3,11 @@
 ## Dashboard date, weather, and photo overlay repair
 
 - [x] Restore the local date in the legacy starter dashboard and check older frame receipts.
-- [ ] Keep dashboard weather current and verify the reading against Home Assistant.
+- [x] Keep dashboard weather current and verify the reading against Home Assistant.
 - [x] Make capture date, age and location easy to assign to the photo half of alternating playback.
-- [ ] Review, test and publish the app, then verify the dashboard and photo overlay on the paired frame.
+- [x] Review, test and publish the app, then verify the dashboard and photo overlay on the paired frame.
+
+Dev.25 passed 291 Python tests and six controller tests on the Mac and in the Home Assistant OS app image. An isolated dev.24 upgrade recovered the date tile, preserved the photo library and receipt, and delivered five alternating frames. Desktop Chromium and mobile WebKit verified the photo overlay selector. The backed-up App Store installation matched the tested package. On the paired frame, the acknowledged dashboard bitmap matched the Home Assistant date and weather. The acknowledged photo bitmap matched a fresh render with capture date, age, and location read from its original.
 
 ## Alternating photos and dashboards and Home Assistant controls
 
