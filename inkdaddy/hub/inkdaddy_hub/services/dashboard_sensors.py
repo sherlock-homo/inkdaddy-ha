@@ -9,6 +9,7 @@ from ..models import HAEntityCache
 
 DASHBOARD_DOMAINS = ("sensor", "weather")
 DASHBOARD_MAX_AGE = timedelta(hours=1)
+WEATHER_MAX_AGE = timedelta(hours=3)
 UNAVAILABLE_STATES = ("unavailable", "unknown")
 _MEASUREMENT_CLASSES = {
     "aqi", "atmospheric_pressure", "battery", "carbon_dioxide", "carbon_monoxide",
@@ -27,16 +28,22 @@ def entity_attributes(entity: HAEntityCache) -> dict[str, Any]:
     return attributes if isinstance(attributes, dict) else {}
 
 
-def report_is_recent(report: datetime | None, at: datetime) -> bool:
+def report_is_recent(report: datetime | None, at: datetime, max_age: timedelta = DASHBOARD_MAX_AGE) -> bool:
     if report is None:
         return False
     now = at.astimezone(timezone.utc).replace(tzinfo=None) if at.tzinfo else at
-    return now - DASHBOARD_MAX_AGE <= report <= now + timedelta(minutes=1)
+    return now - max_age <= report <= now + timedelta(minutes=1)
+
+
+def dashboard_report_lifetime(domain: str) -> timedelta:
+    return WEATHER_MAX_AGE if domain == "weather" else DASHBOARD_MAX_AGE
 
 
 def dashboard_eligible(entity: HAEntityCache, at: datetime) -> bool:
     state = entity.state
-    if not state or state in UNAVAILABLE_STATES or not report_is_recent(entity.source_reported_at, at):
+    if not state or state in UNAVAILABLE_STATES:
+        return False
+    if not report_is_recent(entity.source_reported_at, at, dashboard_report_lifetime(entity.domain)):
         return False
     if entity.domain == "weather":
         return True

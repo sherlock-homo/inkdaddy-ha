@@ -21,6 +21,7 @@ from ..services.dashboard import (
     validate_dashboard_config,
 )
 from ..services.dashboard_content import (
+    PHOTO_DETAILS_OVERLAY,
     PhotoOverlay,
     dashboard_config,
     editable_dashboard_yaml,
@@ -127,7 +128,7 @@ def set_photo_overlay(
     device = db.scalar(select(Device).where(Device.device_uid == device_uid))
     if device is None:
         raise HTTPException(status_code=404, detail="Display not found.")
-    if payload.dashboard_id is not None:
+    if payload.dashboard_id not in (None, PHOTO_DETAILS_OVERLAY):
         config = dashboard_config(_find(db, payload.dashboard_id))
         if not config["widgets"]:
             raise HTTPException(status_code=422, detail="Add a widget to this dashboard before using it over photos.")

@@ -1,5 +1,12 @@
 # inkDaddy Home Assistant repository checklist
 
+## Dashboard date, weather, and photo overlay repair
+
+- [x] Restore the local date in the legacy starter dashboard and check older frame receipts.
+- [ ] Keep dashboard weather current and verify the reading against Home Assistant.
+- [x] Make capture date, age and location easy to assign to the photo half of alternating playback.
+- [ ] Review, test and publish the app, then verify the dashboard and photo overlay on the paired frame.
+
 ## Alternating photos and dashboards and Home Assistant controls
 
 - [x] Add a per-display mode that alternates a playlist photo and a full dashboard, each for half of the configured cycle. Preserve existing playlists, overlays, and receipts.

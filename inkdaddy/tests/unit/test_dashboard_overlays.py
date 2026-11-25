@@ -142,6 +142,8 @@ def test_photo_overlay_assignment_preview_and_removal(catalog, monkeypatch, tmp_
         assert client.put(f"{route}/test-panel", json={"dashboard_id": "missing"}).status_code == 404
         assert client.put(f"{route}/test-panel", json={"dashboard_id": "empty"}).status_code == 422
         assert client.put(f"{route}/missing-panel", json={"dashboard_id": "cards"}).status_code == 404
+        assert client.put(f"{route}/test-panel", json={"dashboard_id": "@photo-details"}).is_success
+        assert client.get(route).json()["overlays"][0]["dashboard_id"] == "@photo-details"
         assert client.put(f"{route}/test-panel", json={"dashboard_id": "cards"}).json() == {
             "device_uid": "test-panel", "dashboard_id": "cards",
         }
@@ -158,6 +160,34 @@ def test_photo_overlay_assignment_preview_and_removal(catalog, monkeypatch, tmp_
         assert client.post("/api/dashboards/preview", json={"photo_id": 2}).status_code == 404
         assert client.put(f"{route}/test-panel", json={"dashboard_id": None}).json()["dashboard_id"] is None
         assert client.delete("/api/dashboards/cards").status_code == 200
+
+
+@pytest.mark.parametrize(("has_date", "location", "expected"), [
+    (True, "Example city", ("Nov 22, 2025 · 1 year ago", "Example city")),
+    (True, "", ("Nov 22, 2025 · 1 year ago", "")),
+    (False, "Example city", ("Example city", "")),
+    (False, "", None),
+])
+def test_photo_details_caption_uses_only_available_fields(catalog, monkeypatch, has_date, location, expected):
+    from inkdaddy_hub.services import dashboard_content
+
+    captured = NOW.date().replace(year=2025) if has_date else None
+    monkeypatch.setattr(dashboard_content, "capture_details",
+                        lambda *a, **kw: dashboard_content.CaptureDetails(captured, location))
+    with catalog() as db:
+        photo = db.get(Photo, 1)
+        overlay = resolve_photo_overlay(db, "@photo-details", NOW, None, photo=photo)
+        if expected is None:
+            assert overlay is None
+            return
+        widget, = overlay.widgets
+        assert (widget.value, widget.detail) == expected
+        base = Image.new("RGB", (800, 480), "black")
+        painted = overlay.render(base)
+        left, top, right, bottom = painted.getbbox()
+        assert 15 <= left < right <= 400 and 395 <= top < bottom <= 464
+        restored = dashboard_content.PhotoOverlay.from_snapshot(overlay.snapshot)
+        assert restored.render(base).tobytes() == painted.tobytes()
 
 
 def test_date_overlay_snapshot_tracks_rendered_text_and_preserves_photo(catalog):
@@ -340,3 +370,54 @@ def test_resized_photo_overlays_restore_both_new_and_historical_geometry():
     repaired = PhotoOverlay.from_snapshot(legacy).render(original)
     assert repaired.getpixel((100, 350)) == original.getpixel((100, 350))
     assert repaired.getpixel((100, 100)) != original.getpixel((100, 100))
+
+
+def test_retired_starter_clock_becomes_date_only_when_still_present(catalog):
+    from inkdaddy_hub.services.dashboard import HISTORICAL_SAMPLE_DASHBOARD, load_dashboard_yaml
+
+    saved = load_dashboard_yaml(HISTORICAL_SAMPLE_DASHBOARD)
+    saved["name"] = "My saved dashboard"
+    saved["widgets"][1]["source"]["entity_id"] = "weather.selected"
+    saved["widgets"][3]["source"] = {"type": "home_assistant", "entity_id": "sensor.den_battery"}
+    with catalog.begin() as db:
+        record = Dashboard(slug="saved", name=saved["name"], current_yaml=json.dumps(saved))
+        db.add(record)
+    with catalog() as db:
+        current = dashboards.get_dashboard("saved", db)
+        starter_date, = [w for w in dashboard_config(None)["widgets"] if w["source"] == {"type": "date"}]
+        assert (starter_date["x"], starter_date["y"], starter_date["w"], starter_date["h"]) == (0, 0, 2, 1)
+        assert current["config"]["widgets"] == [*saved["widgets"][1:], starter_date]
+        assert json.loads(current["yaml"])["widgets"] == current["config"]["widgets"]
+        dashboards.update_dashboard("saved", {"yaml": current["yaml"]}, db)
+        record = db.scalar(select(Dashboard).where(Dashboard.slug == "saved"))
+        assert dashboard_config(record, historical=True)["widgets"] == saved["widgets"]
+        # A deliberate removal, including when dev24 had already saved the
+        # blank corner, must survive a reload.
+        empty_corner = {**saved, "widgets": saved["widgets"][1:]}
+        dashboards.update_dashboard("saved", {"yaml": json.dumps(empty_corner)}, db)
+        assert dashboards.get_dashboard("saved", db)["config"]["widgets"] == saved["widgets"][1:]
+        existing_date = {**DATE, "x": 3, "y": 1}
+        record.current_yaml = json.dumps({**saved, "widgets": [saved["widgets"][0], existing_date]})
+        assert dashboard_config(record)["widgets"] == [existing_date]
+
+
+def test_date_on_dashboard_and_preview_rolls_over_at_home_assistant_midnight(catalog, monkeypatch):
+    from inkdaddy_hub.services.dashboard_content import WidgetText, render_dashboard
+    from inkdaddy_hub.services.rendering import render_preview_png_bytes
+
+    class PreviewClock(datetime):
+        @classmethod
+        def now(cls, tz):
+            return datetime(2026, 11, 25, 4, 59, tzinfo=timezone.utc).astimezone(tz)
+
+    monkeypatch.setattr(dashboards, "datetime", PreviewClock)
+    before = PreviewClock.now(timezone.utc)
+    after = before + timedelta(minutes=1)
+    with catalog() as db:
+        config = dashboards.get_dashboard("cards", db)["config"]
+        tuesday = [WidgetText("Date", "Tue, Nov 24")]
+        wednesday = [WidgetText("Date", "Wed, Nov 25")]
+        assert resolve_widget_text(db, config, before, None, observed_at=after) == tuesday
+        assert resolve_widget_text(db, config, after, None, observed_at=before) == wednesday
+        preview = dashboards.preview_dashboard("cards", device_uid=None, photo_id=None, db=db)
+        assert preview.body == render_preview_png_bytes(render_dashboard(config, tuesday))

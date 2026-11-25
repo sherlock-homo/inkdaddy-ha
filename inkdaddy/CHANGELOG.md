@@ -1,3 +1,9 @@
+## 0.2.0-dev.25
+
+- Restore the local **Date** tile where the original Home Status clock left an empty space. Custom layouts keep their chosen tiles.
+- Keep hourly weather reports visible between Home Assistant syncs. Readings more than an hour old show the provider’s report time and expire after three hours.
+- Choose **Photo details** under **Dashboards → Photo overlays** for a lower-left caption with the photo’s capture date, age and available location. Photos without those details stay clear.
+
 ## 0.2.0-dev.24
 
 - Alternate playlist photos with a full-screen dashboard. Each gets half of the display’s configured cycle. A 60-minute cycle changes the screen every 30 minutes.

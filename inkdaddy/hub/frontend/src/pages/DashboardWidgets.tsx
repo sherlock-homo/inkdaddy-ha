@@ -123,10 +123,11 @@ export function WidgetGallery({ disabled, onAdd }: {
   </div>;
 }
 
-type DashboardEntity = HAEntity & { area_name?: string | null; device_name?: string | null };
+type DashboardEntity = HAEntity & { area_name?: string | null; device_name?: string | null; dashboard_valid_until?: string };
 const maxReportAgeMs = 60 * 60 * 1000;
 
 function reportExpiresAt(entity: DashboardEntity) {
+  if (entity.dashboard_valid_until) return Date.parse(entity.dashboard_valid_until);
   return Date.parse(entity.source_reported_at ?? "") + maxReportAgeMs;
 }
 
@@ -206,9 +207,12 @@ function EntityPicker({ kind, selected, disabled, onChange }: {
       return Number.isFinite(stamp) ? `${level}% · Reported ${new Date(stamp).toLocaleString()}` : `${level}% · Report time unknown`;
     }
     if (kind !== "weather") return state;
-    if (state === "partlycloudy") return "Partly cloudy";
-    const words = state.replaceAll("-", " ");
-    return words.charAt(0).toUpperCase() + words.slice(1);
+    const words = state === "partlycloudy" ? "partly cloudy" : state.replaceAll("-", " ");
+    const condition = words.charAt(0).toUpperCase() + words.slice(1);
+    const stamp = Date.parse(entity.source_reported_at ?? "");
+    return stamp + maxReportAgeMs < asOf
+      ? `${condition} · Reported ${new Date(stamp).toLocaleTimeString([], { hour: "numeric", minute: "2-digit" })}`
+      : condition;
   };
   const current = entities.find((entity) => entity.entity_id === selected);
   return <div className="dd-entity-picker">

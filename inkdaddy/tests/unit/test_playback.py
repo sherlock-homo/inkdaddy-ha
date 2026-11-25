@@ -26,6 +26,7 @@ from inkdaddy_hub.models import (
     PhotoRevision,
     Playback,
     PlaybackSlot,
+    Setting,
 )
 from inkdaddy_hub.services import playback
 from inkdaddy_hub.services.dashboard_content import dashboard_config, resolve_widget_text
@@ -150,7 +151,7 @@ def test_change_refresh_interval_preserves_current_offer_and_round_trips_matter(
     assert following.source_type == "dashboard"
 
 
-@pytest.mark.parametrize("overlay_id", ["sample", "agenda"])
+@pytest.mark.parametrize("overlay_id", ["sample", "agenda", "@photo-details"])
 def test_photo_overlay_repairs_exact_offered_bytes_after_photo_and_layout_edits(
     catalog, tmp_path, monkeypatch, overlay_id,
 ):
@@ -167,6 +168,9 @@ def test_photo_overlay_repairs_exact_offered_bytes_after_photo_and_layout_edits(
     })))
     db.flush()
     monkeypatch.setattr(dashboard_content, "upcoming_agenda", lambda *args, **kwargs: ("17:15 · Fixture",))
+    if overlay_id == "@photo-details":
+        monkeypatch.setattr(dashboard_content, "capture_details",
+                            lambda *args, **kwargs: dashboard_content.CaptureDetails(NOW.date(), "Fixture city"))
     device.selected_source_type = "photo"
     plain = refresh_playback_slots(db, device, now=NOW)
     plain_id = plain.frame_id
@@ -177,6 +181,14 @@ def test_photo_overlay_repairs_exact_offered_bytes_after_photo_and_layout_edits(
     if overlay_id == "agenda":
         assert '"agenda": true' in due.photo_render_json
         assert "calendar.fixture" not in due.photo_render_json
+    if overlay_id == "@photo-details":
+        tile, = json.loads(due.photo_render_json)["overlay"]
+        assert tile["caption"] is True
+        assert tile["text"] == {"label": "", "value": "Nov 18, 2026 · Today", "detail": "Fixture city"}
+        refresh_playback_slots(db, device, now=NOW)
+        upcoming = db.scalars(select(PlaybackSlot).where(PlaybackSlot.scheduled_second > due.scheduled_second)).all()
+        assert len(upcoming) == playback.UPCOMING_SLOTS
+        assert all(json.loads(slot.photo_render_json)["overlay"][0]["caption"] for slot in upcoming)
     original_frame = db.scalar(select(Frame).where(Frame.frame_id == original_offer.frame_id))
     frame_path = Path(original_frame.path)
     db.add(PhotoRevision(photo_id=photo.id, processed_path=photo.processed_path))
@@ -318,29 +330,69 @@ def test_existing_hour_stays_stable_after_ha_state_changes(catalog):
     assert widgets[2].value == "0%"
 
 
-def test_sample_weather_uses_first_available_provider(catalog):
+def test_weather_uses_hourly_provider_reports_and_preserves_pinned_sources(catalog):
     db, device, _photo = catalog
+    db.add(Setting(key="home_assistant.site", value_json='{"time_zone":"America/New_York"}'))
     db.add_all([
         HAEntityCache(entity_id="weather.a_unavailable", domain="weather", state="unavailable"),
         HAEntityCache(entity_id="weather.b_unknown", domain="weather", state="unknown"),
         HAEntityCache(entity_id="weather.c_null", domain="weather", state=None),
+        HAEntityCache(entity_id="weather.a_old", domain="weather", state="sunny",
+                      source_reported_at=NOW.replace(tzinfo=None) - timedelta(minutes=70)),
+        HAEntityCache(entity_id="weather.a_future", domain="weather", state="rainy",
+                      source_reported_at=NOW.replace(tzinfo=None) + timedelta(days=2)),
+        HAEntityCache(entity_id="weather.e_no_report", domain="weather", state="sunny"),
         HAEntityCache(
-            entity_id="weather.d_local",
-            domain="weather",
-            state="partlycloudy",
+            entity_id="weather.d_local", domain="weather", state="partlycloudy",
             source_reported_at=NOW.replace(tzinfo=None),
             attributes_json='{"temperature": 71, "temperature_unit": "°F"}',
         ),
-        HAEntityCache(entity_id="weather.e_other", domain="weather", state="sunny"),
     ])
     db.flush()
     config = dashboard_config(None)
-    weather, *_ = resolve_widget_text(db, config, NOW + timedelta(hours=4), device, observed_at=NOW)
-    assert (weather.value, weather.detail) == ("Partly cloudy", "71 °F")
-    assert resolve_widget_text(db, config, NOW, device, observed_at=NOW + timedelta(minutes=61))[0].value == "Unavailable"
+    config["widgets"] = [w for w in config["widgets"] if w["source"]["type"] == "weather"]
 
-    config["widgets"][0]["source"]["entity_id"] = "weather.a_unavailable"
-    assert resolve_widget_text(db, config, NOW, device)[0].value == "Unavailable"
+    def weather(minutes, version="current"):
+        return resolve_widget_text(db, config, NOW + timedelta(hours=4), device,
+                                   observed_at=NOW + timedelta(minutes=minutes), render_version=version)[0]
+
+    assert (weather(0).value, weather(0).detail) == ("Partly cloudy", "71 °F")
+    assert weather(60).detail == "71 °F"
+    assert (weather(61).value, weather(61).detail) == ("Partly cloudy", "71 °F · Reported Nov 18 11:45")
+    assert weather(61, "dev24").value == "Unavailable"
+    assert weather(180).value == "Partly cloudy"
+    assert weather(181).value == "Unavailable"
+
+    source = config["widgets"][0]["source"]
+    source["entity_id"] = "weather.a_old"
+    assert (weather(0).value, weather(0).detail) == ("Sunny", "Reported Nov 18 10:35")
+    for unavailable in ("a_unavailable", "b_unknown", "c_null", "a_future", "e_no_report", "missing"):
+        source["entity_id"] = "weather." + unavailable
+        assert weather(0).value == "Unavailable"
+
+
+def test_matter_offer_refreshes_weather_in_a_precomputed_dashboard(catalog):
+    db, device, _photo = catalog
+    first = NOW.replace(minute=0)
+    due = first + timedelta(hours=2)
+    provider = HAEntityCache(entity_id="weather.hourly", domain="weather", state="sunny",
+                             source_reported_at=first.replace(tzinfo=None))
+    db.add(provider)
+    db.flush()
+    refresh_playback_slots(db, device, now=first)
+    slot = db.get(PlaybackSlot, (device.id, playback.epoch_second(due)))
+    early_frame_id = slot.frame_id
+
+    provider.state = "rainy"
+    provider.source_reported_at = (due - timedelta(minutes=20)).replace(tzinfo=None)
+    db.flush()
+    offer = prepare_matter_frame(db, device.device_uid, now=due)
+    assert offer.frame_id != early_frame_id
+    config = dashboard_config(None)
+    widgets = resolve_widget_text(db, config, due, device, observed_at=due)
+    assert any(w.label == "Weather" and w.value == "Rainy" for w in widgets)
+    raw, sha = raw_frame_from_image(playback.render_dashboard(config, widgets), dither=True)
+    assert (offer.payload, offer.sha256) == (raw, sha)
 
 
 @pytest.mark.parametrize("action", ["next_content", "previous_content", "refresh_current"])
@@ -400,14 +452,24 @@ def test_paused_manual_dashboard_refresh_uses_new_date_and_repairs_exact_bitmap(
         assert frame_path.read_bytes() == exact
 
 
-@pytest.mark.parametrize("render_version", ["dev23", "dev20", "previous", "legacy"])
-def test_existing_dashboard_offer_keeps_its_original_bitmap_after_clock_update(catalog, render_version):
+@pytest.mark.parametrize("render_version", ["dev24", "dev23", "dev20", "previous", "legacy"])
+def test_existing_dashboard_offer_keeps_its_original_bitmap_after_clock_update(catalog, render_version, monkeypatch):
     db, device, _photo = catalog
     device.battery_percent = 84
     hour = playback.epoch_second(NOW.replace(minute=0))
     timestamp = NOW.replace(minute=0)
     config = dashboard_config(None, historical=True)
-    widgets = resolve_widget_text(db, config, timestamp, device, render_version=render_version)
+    if render_version == "dev24":
+        config["widgets"] = [w for w in config["widgets"] if w["source"]["type"] != "clock"]
+        db.add(HAEntityCache(entity_id="weather.hourly", domain="weather", state="rainy",
+                             source_reported_at=NOW.replace(tzinfo=None) - timedelta(minutes=75)))
+        db.flush()
+        monkeypatch.setattr(playback, "_utc_now", lambda: NOW)
+    widgets = resolve_widget_text(db, config, timestamp, device, render_version=render_version, observed_at=NOW)
+    if render_version == "dev24":
+        assert any(w.label == "Weather" and w.value == "Unavailable" for w in widgets)
+        current = resolve_widget_text(db, config, timestamp, device, observed_at=NOW)
+        assert any(w.label == "Weather" and w.value == "Rainy" for w in current)
     if render_version == "dev20":
         assert widgets[0].detail == "For Wed, Nov 18"
         assert widgets[3].detail == "Last reported"
@@ -434,6 +496,26 @@ def test_existing_dashboard_offer_keeps_its_original_bitmap_after_clock_update(c
     recovered = prepare_matter_frame(db, device.device_uid, now=NOW, repair_cache=True)
     assert recovered == offer
     assert cache_path.read_bytes() == exact
+
+
+def test_scheduled_offer_repair_uses_original_weather_observation(catalog, monkeypatch):
+    db, device, _photo = catalog
+    provider = HAEntityCache(
+        entity_id="weather.hourly", domain="weather", state="sunny",
+        source_reported_at=(NOW - timedelta(minutes=179)).replace(tzinfo=None),
+    )
+    db.add(provider)
+    db.flush()
+    original = prepare_matter_frame(db, device.device_uid, now=NOW)
+    frame = db.scalar(select(Frame).where(Frame.frame_id == original.frame_id))
+    Path(frame.path).unlink()
+    retry = NOW + timedelta(minutes=3)
+    monkeypatch.setattr(playback, "_utc_now", lambda: retry)
+    values = resolve_widget_text(db, dashboard_config(None), retry, device, observed_at=retry)
+    assert next(w for w in values if w.label == "Weather").value == "Unavailable"
+    recovered = prepare_matter_frame(db, device.device_uid, now=retry, repair_cache=True)
+    assert recovered == original
+    assert Path(frame.path).read_bytes() == original.payload
 
 
 def test_manual_action_selects_configured_dashboard(catalog):
@@ -813,7 +895,7 @@ def test_matter_delivery_keeps_confirmed_offer_when_source_no_longer_matches(cat
     )
     db.add(HAEntityCache(
         entity_id="weather.home", domain="weather", state="sunny",
-        source_reported_at=datetime.now(timezone.utc).replace(tzinfo=None),
+        source_reported_at=NOW.replace(tzinfo=None),
     ))
     db.commit()
     current = playback_status(db, device, NOW)["current"]

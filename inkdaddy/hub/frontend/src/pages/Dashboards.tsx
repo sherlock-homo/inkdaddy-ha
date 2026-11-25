@@ -11,6 +11,7 @@ import "./dashboards.css";
 
 const emptyConfig: DashboardConfig = { name: "", grid: { cols: 4, rows: 2 }, widgets: [] };
 type PhotoOverlay = { device_uid: string; dashboard_id: string | null };
+const photoDetailsOverlay = "@photo-details";
 export type DashboardDraft = { dashboard: DashboardRecord | null; config: DashboardConfig; tile: Tile };
 
 function dashboardError(reason: unknown, fallback: string) {
@@ -189,7 +190,7 @@ function PhotoOverlaySettings({ devices, dashboards }: { devices: DeviceRecord[]
   return <section className="workflow-panel dd-overlay-settings" aria-labelledby="dd-photo-overlay-heading">
     <div>
       <h2 id="dd-photo-overlay-heading">Photo overlays</h2>
-      <p>Show a saved layout over photos on a display. Use the editor to preview it on a photo.</p>
+      <p>Show capture details or a saved dashboard over each photo. In alternating mode, overlays appear during the photo half.</p>
     </div>
     <form className="form-row" onSubmit={(event) => void save(event)}>
       <label>Display<select aria-label="Display" value={deviceUid} disabled={saving} onChange={(event) => {
@@ -200,7 +201,8 @@ function PhotoOverlaySettings({ devices, dashboards }: { devices: DeviceRecord[]
       <label>Overlay layout<select aria-label="Overlay layout" value={layout} disabled={!assignments || saving}
         onChange={(event) => { setDraft(event.target.value); setStatus(""); }}>
         <option value="">No overlay</option>
-        {saved && !dashboards.some((record) => record.id === saved && record.config.widgets.length > 0) &&
+        <option value={photoDetailsOverlay}>Photo details</option>
+        {saved && saved !== photoDetailsOverlay && !dashboards.some((record) => record.id === saved && record.config.widgets.length > 0) &&
           <option value={saved}>{dashboards.find((record) => record.id === saved)?.name || saved}</option>}
         {dashboards.filter((record) => record.config.widgets.length > 0).map((record) =>
           <option key={record.id} value={record.id}>{record.name}</option>)}
@@ -209,6 +211,10 @@ function PhotoOverlaySettings({ devices, dashboards }: { devices: DeviceRecord[]
         {saving ? "Applying…" : "Apply overlay"}
       </button>
     </form>
+    {layout === photoDetailsOverlay && <p className="dd-hint">
+      Shows the date taken, photo age, and available place name or rounded coordinates in the lower left.
+      Photos without these details appear without a caption.
+    </p>}
     {error && <p className="warning-text" role="alert">{error}</p>}
     {status && <p className="preview-message" role="status">{status}</p>}
   </section>;

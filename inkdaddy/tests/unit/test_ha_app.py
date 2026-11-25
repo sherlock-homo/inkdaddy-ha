@@ -237,7 +237,8 @@ def test_dashboard_entity_catalog_is_cache_only_and_filters_for_fresh_measuremen
             state("sensor.c_unknown", "unknown", 7, device_class="temperature"),
             state("sensor.d_unbounded", "inf", 3, device_class="temperature"),
             state("sensor.e_temperature", "18", 24, device_class="temperature", token="fixture-only"),
-            state("weather.home", "sunny", 25, temperature=float("inf"), temperature_unit="°C"),
+            state("weather.expired", "rainy", 181),
+            state("weather.home", "sunny", 75, temperature=float("inf"), temperature_unit="°C"),
             state("switch.fan", "off", 5),
             state("input_text.example", "fixture-only", 4),
             state("sensor.textual", "fixture-only", 3, device_class="temperature"),
@@ -252,6 +253,7 @@ def test_dashboard_entity_catalog_is_cache_only_and_filters_for_fresh_measuremen
         assert db.get(HAEntityCache, "sensor.textual").state is None
         weather = api.entities(db=db, domain="weather", purpose="dashboard", limit=2)
         assert [entity["entity_id"] for entity in weather["entities"]] == ["weather.home"]
+        assert weather["entities"][0]["dashboard_valid_until"] == (now + timedelta(minutes=105)).isoformat()
         assert "temperature" not in weather["entities"][0]["attributes"]
         assert api.entities(db=db, domain="switch", purpose="dashboard", limit=2)["entities"] == []
     engine.dispose()

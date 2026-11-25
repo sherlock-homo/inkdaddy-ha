@@ -1,9 +1,10 @@
 from __future__ import annotations
 
 import json
+from collections.abc import Iterator
 from copy import deepcopy
 from dataclasses import asdict, dataclass
-from datetime import datetime, timezone
+from datetime import datetime, timezone, tzinfo
 from functools import lru_cache
 from typing import Any, Literal
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
@@ -14,15 +15,23 @@ from sqlalchemy.orm import Session
 
 from ..config import get_settings
 from ..models import Dashboard, Device, HAEntityCache, Photo, Setting
-from .dashboard import HISTORICAL_SAMPLE_DASHBOARD, SAMPLE_DASHBOARD, load_dashboard_yaml, validate_dashboard_config
+from .dashboard import (
+    HISTORICAL_SAMPLE_DASHBOARD,
+    SAMPLE_DASHBOARD,
+    DashboardValidationError,
+    load_dashboard_yaml,
+    validate_dashboard_config,
+)
 from .dashboard_calendar import calendar_id, calendar_scope, upcoming_agenda
 from .dashboard_sensors import UNAVAILABLE_STATES, battery_level, dashboard_eligible, entity_attributes, report_is_recent
 from .photo_metadata import CaptureDetails, capture_details, photo_age
 from .rendering import _font
 
 SITE_SETTING = "home_assistant.site"
+# Dashboard slugs only contain letters, digits, underscores and hyphens.
+PHOTO_DETAILS_OVERLAY = "@photo-details"
 DashboardTimeKind = Literal["scheduled", "manual", "preview"]
-DashboardRenderVersion = Literal["current", "dev23", "dev20", "previous", "legacy"]
+DashboardRenderVersion = Literal["current", "dev24", "dev23", "dev20", "previous", "legacy"]
 
 
 @dataclass(frozen=True)
@@ -36,6 +45,10 @@ class AgendaText(WidgetText):
     """Text laid out as one event per line."""
 
 
+class PhotoCaption(WidgetText):
+    """Compact one- or two-line caption on a photo."""
+
+
 @dataclass(frozen=True)
 class PhotoOverlay:
     config: dict[str, Any]
@@ -46,16 +59,22 @@ class PhotoOverlay:
         return [
             {"x": tile["x"], "y": tile["y"], "w": tile["w"],
              "agenda": isinstance(widget, AgendaText), "text": asdict(widget),
+             **({"caption": True} if isinstance(widget, PhotoCaption) else {}),
              **({"h": 2} if tile.get("h") == 2 else {})}
             for tile, widget in zip(self.config["widgets"], self.widgets, strict=True)
         ]
 
     @classmethod
     def from_snapshot(cls, snapshot: list[dict[str, Any]]) -> PhotoOverlay:
-        return cls(
-            {"widgets": snapshot},
-            [(AgendaText if tile["agenda"] else WidgetText)(**tile["text"]) for tile in snapshot],
-        )
+        widgets: list[WidgetText] = []
+        for tile in snapshot:
+            if tile.get("caption"):
+                widgets.append(PhotoCaption(**tile["text"]))
+            elif tile["agenda"]:
+                widgets.append(AgendaText(**tile["text"]))
+            else:
+                widgets.append(WidgetText(**tile["text"]))
+        return cls({"widgets": snapshot}, widgets)
 
     def render(self, image: Image.Image) -> Image.Image:
         overlay = Image.new("RGBA", (800, 480))
@@ -63,6 +82,16 @@ class PhotoOverlay:
         for tile, widget in zip(self.config["widgets"], self.widgets, strict=True):
             x = 17 + tile["x"] * 194
             w = tile["w"] * 194 - 10
+            if isinstance(widget, PhotoCaption):
+                width = min(w, 26 + round(max(draw.textlength(widget.value, font=_font(22)),
+                                               draw.textlength(widget.detail, font=_font(18)))))
+                y = 397 if widget.detail else 421
+                draw.rounded_rectangle((x, y, x + width, 462), radius=9, fill=(255, 255, 255, 238),
+                                       outline=(0, 0, 0, 255), width=2)
+                _fit_text(draw, widget.value, (x + 13, y + 7), width - 26, 22, "black")
+                if widget.detail:
+                    _fit_text(draw, widget.detail, (x + 13, y + 35), width - 26, 18, "black")
+                continue
             agenda = isinstance(widget, AgendaText)
             lines = _agenda_lines(widget) if agenda else ()
             h = 54 + len(lines) * 29 if agenda else 114
@@ -87,7 +116,7 @@ def get_dashboard_record(db: Session, slug: str | None) -> Dashboard | None:
 
 
 @lru_cache(maxsize=128)
-def editable_dashboard_yaml(source: str) -> str:
+def editable_dashboard_yaml(source: str, *, restore_starter_date: bool = True) -> str:
     config = load_dashboard_yaml(source)
     widgets = config.get("widgets")
     if isinstance(widgets, list):
@@ -96,15 +125,51 @@ def editable_dashboard_yaml(source: str) -> str:
             and item["source"].get("type") == "clock"
         )]
         if len(kept) != len(widgets):
+            # Only the starter clock has a known replacement. Never fill a
+            # deliberately empty tile or introduce a second calendar date.
+            if restore_starter_date and not any(
+                isinstance(item, dict) and isinstance(item.get("source"), dict)
+                and item["source"].get("type") == "date" for item in kept
+            ):
+                starter_clock = next(w for w in load_dashboard_yaml(HISTORICAL_SAMPLE_DASHBOARD)["widgets"]
+                                     if w["source"]["type"] == "clock")
+                if starter_clock in widgets:
+                    date = next(w for w in load_dashboard_yaml(SAMPLE_DASHBOARD)["widgets"]
+                                if w["source"]["type"] == "date")
+                    if any(isinstance(item, dict) and item.get("id") == date["id"] for item in kept):
+                        date["id"] = starter_clock["id"]
+                    kept.append(date)
             return json.dumps({**config, "widgets": kept}, indent=2, ensure_ascii=False)
     return source
 
 
+def _historical_yaml(record: Dashboard | None) -> str:
+    if record is None:
+        return HISTORICAL_SAMPLE_DASHBOARD
+    return next((old.yaml for old in record.versions if old.version_number == 0), record.current_yaml)
+
+
 def dashboard_config(record: Dashboard | None, *, historical: bool = False) -> dict[str, Any]:
-    source = record.current_yaml if record else (HISTORICAL_SAMPLE_DASHBOARD if historical else SAMPLE_DASHBOARD)
-    if historical and record:
-        source = next((old.yaml for old in record.versions if old.version_number == 0), source)
+    source = record.current_yaml if record else SAMPLE_DASHBOARD
+    if historical:
+        source = _historical_yaml(record)
     return deepcopy(_parsed_dashboard(source, historical))
+
+
+def dev24_dashboard_configs(record: Dashboard | None) -> Iterator[dict[str, Any]]:
+    # An edit may have archived the original clock layout. Dev24 removed every
+    # clock before normalizing widget IDs and calculating the offer hash.
+    sources = [_historical_yaml(record)]
+    if record and record.current_yaml != sources[0]:
+        sources.append(record.current_yaml)
+    for source in sources:
+        filtered = editable_dashboard_yaml(source, restore_starter_date=False)
+        try:
+            config = validate_dashboard_config(load_dashboard_yaml(filtered))
+        except DashboardValidationError:
+            # Earlier releases accepted some source bindings dev24 rejected.
+            continue
+        yield config
 
 
 @lru_cache(maxsize=128)
@@ -125,6 +190,19 @@ def resolve_photo_overlay(
 ) -> PhotoOverlay | None:
     if not overlay_id:
         return None
+    if overlay_id == PHOTO_DETAILS_OVERLAY:
+        if photo is None:
+            return None
+        details = capture_details(get_settings().data_dir, photo.original_path, want_date=True, want_location=True)
+        if not details.taken and not details.location:
+            return None
+        if details.taken:
+            _, local = _site_context(db, timestamp)
+            age = photo_age(details.taken, local.date())
+            caption = PhotoCaption("", f"{details.taken:%b %d, %Y} · {age}", details.location)
+        else:
+            caption = PhotoCaption("", details.location)
+        return PhotoOverlay({"widgets": [{"x": 0, "y": 1, "w": 2}]}, [caption])
     record = get_dashboard_record(db, overlay_id)
     if record is None and overlay_id != "sample":
         return None
@@ -133,6 +211,16 @@ def resolve_photo_overlay(
         return None
     return PhotoOverlay(config, resolve_widget_text(db, config, timestamp, device, observed_at=observed_at,
                                                     time_kind=time_kind, photo=photo))
+
+
+def _site_context(db: Session, timestamp: datetime) -> tuple[dict[str, Any], datetime]:
+    site_setting = db.get(Setting, SITE_SETTING)
+    site = json.loads(site_setting.value_json) if site_setting else {}
+    try:
+        local = timestamp.astimezone(ZoneInfo(site.get("time_zone") or "UTC"))
+    except (ValueError, ZoneInfoNotFoundError):
+        local = timestamp.astimezone(ZoneInfo("UTC"))
+    return site, local
 
 
 def resolve_widget_text(
@@ -146,15 +234,10 @@ def resolve_widget_text(
     time_kind: DashboardTimeKind = "scheduled",
     render_version: DashboardRenderVersion = "current",
 ) -> list[WidgetText]:
-    site_setting = db.get(Setting, SITE_SETTING)
-    site = json.loads(site_setting.value_json) if site_setting else {}
-    try:
-        local = timestamp.astimezone(ZoneInfo(site.get("time_zone") or "UTC"))
-    except (ValueError, ZoneInfoNotFoundError):
-        local = timestamp.astimezone(ZoneInfo("UTC"))
+    site, local = _site_context(db, timestamp)
     observed_at = observed_at or datetime.now(timezone.utc)
     widgets: list[WidgetText] = []
-    supports_overlay_widgets = render_version in ("current", "dev23", "dev20")
+    supports_overlay_widgets = render_version in ("current", "dev24", "dev23", "dev20")
     show_agenda = supports_overlay_widgets and any(w["source"].get("type") == "calendar" for w in config["widgets"])
     agenda_scope = calendar_scope(db) if show_agenda else None
     details = CaptureDetails()
@@ -169,7 +252,7 @@ def resolve_widget_text(
         source = widget["source"]
         source_type = source.get("type")
         label = str(options.get("label") or widget.get("title") or "")
-        if source_type == "clock" and render_version != "current":
+        if source_type == "clock" and render_version not in ("current", "dev24"):
             if render_version == "legacy":
                 clock_label, detail = "Local time", local.strftime("%A, %B %d")
             elif render_version == "previous":
@@ -195,7 +278,7 @@ def resolve_widget_text(
             else:
                 value = "Calendar unavailable" if rows is None else "No events in the next 24 hours"
                 widgets.append(AgendaText(label or "Upcoming events", value))
-        elif source_type == "photo_metadata" and render_version in ("current", "dev23"):
+        elif source_type == "photo_metadata" and render_version in ("current", "dev24", "dev23"):
             field = source["field"]
             if field == "location":
                 text = WidgetText(label or "Photo location", details.location or "Location unavailable")
@@ -205,7 +288,7 @@ def resolve_widget_text(
                 text = WidgetText(label or "Date taken", details.taken.strftime("%b %d, %Y") if details.taken else "Date unavailable")
             widgets.append(text)
         elif source_type == "location":
-            entity_id = source.get("entity_id") if render_version == "current" else None
+            entity_id = source.get("entity_id") if render_version in ("current", "dev24") else None
             zone = db.get(HAEntityCache, entity_id or "zone.home")
             if entity_id:
                 value = (zone.name or zone.entity_id) if zone and zone.domain == "zone" else "Unavailable"
@@ -219,7 +302,7 @@ def resolve_widget_text(
                 )
             )
         elif source_type == "device_battery":
-            entity_id = source.get("entity_id") if render_version == "current" else None
+            entity_id = source.get("entity_id") if render_version in ("current", "dev24") else None
             if entity_id:
                 battery = db.get(HAEntityCache, entity_id)
                 level = battery_level(battery)
@@ -242,33 +325,40 @@ def resolve_widget_text(
                 )
             )
         elif source.get("entity_id") or source_type == "weather":
-            widgets.append(_entity_widget_text(db, widget, label, observed_at, legacy=render_version == "legacy"))
+            widgets.append(_entity_widget_text(db, widget, label, observed_at, local.tzinfo, render_version))
         else:
             widgets.append(WidgetText(label, str(options.get("text", "Unavailable"))))
     return widgets
 
 
 def _entity_widget_text(
-    db: Session, widget: dict[str, Any], label: str, observed_at: datetime, *, legacy: bool
+    db: Session, widget: dict[str, Any], label: str, observed_at: datetime,
+    display_zone: tzinfo | None, render_version: DashboardRenderVersion,
 ) -> WidgetText:
+    def eligible(entity: HAEntityCache) -> bool:
+        if render_version == "legacy":
+            return True
+        if render_version != "current" and entity.domain == "weather":
+            return report_is_recent(entity.source_reported_at, observed_at)
+        return dashboard_eligible(entity, observed_at)
+
     source = widget["source"]
     entity_id = source.get("entity_id")
     if entity_id:
         entity = db.get(HAEntityCache, str(entity_id))
     else:
-        providers = db.scalars(
-            select(HAEntityCache)
-            .where(
-                HAEntityCache.domain == "weather",
-                HAEntityCache.state.is_not(None),
-                HAEntityCache.state.not_in(UNAVAILABLE_STATES),
-            )
-            .order_by(HAEntityCache.entity_id)
+        query = select(HAEntityCache).where(
+            HAEntityCache.domain == "weather",
+            HAEntityCache.state.is_not(None),
+            HAEntityCache.state.not_in(UNAVAILABLE_STATES),
         )
-        entity = next((provider for provider in providers if legacy or dashboard_eligible(provider, observed_at)), None)
+        if render_version == "current":
+            query = query.order_by(HAEntityCache.source_reported_at.desc())
+        providers = db.scalars(query.order_by(HAEntityCache.entity_id))
+        entity = next((provider for provider in providers if eligible(provider)), None)
     if not entity or not entity.state or entity.state in UNAVAILABLE_STATES:
         return WidgetText(label or str(entity_id or "Weather"), "Unavailable")
-    if not legacy and not dashboard_eligible(entity, observed_at):
+    if not eligible(entity):
         return WidgetText(label or entity.name or entity.entity_id, "Unavailable")
     attrs = entity_attributes(entity)
     unit = widget["options"].get("unit") or attrs.get("unit_of_measurement") or ""
@@ -280,6 +370,9 @@ def _entity_widget_text(
         value = value.replace("-", " ").replace("_", " ").capitalize()
         if attrs.get("temperature") is not None:
             detail = f"{attrs['temperature']} {attrs.get('temperature_unit', '')}".strip()
+        if render_version == "current" and not report_is_recent(entity.source_reported_at, observed_at):
+            when = entity.source_reported_at.replace(tzinfo=timezone.utc).astimezone(display_zone)
+            detail = " · ".join(filter(None, (detail, when.strftime("Reported %b %d %H:%M"))))
     elif unit:
         value = f"{value} {unit}"
     elif widget["type"] in ("on_off_state", "status_pill"):

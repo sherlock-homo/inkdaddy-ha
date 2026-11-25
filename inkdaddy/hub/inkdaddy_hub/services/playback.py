@@ -14,7 +14,7 @@ from time import monotonic
 from urllib.parse import quote
 
 from PIL import Image
-from sqlalchemy import delete, select, text, union
+from sqlalchemy import delete, func, select, text, union
 from sqlalchemy.orm import Session
 
 from ..config import get_settings
@@ -37,6 +37,7 @@ from .asset_storage import asset_names, asset_stat, read_asset, remove_asset, wr
 from .dashboard_content import (
     PhotoOverlay,
     dashboard_config,
+    dev24_dashboard_configs,
     get_dashboard_record,
     render_dashboard,
     resolve_widget_text,
@@ -444,8 +445,16 @@ def _prepare_slot(
         dashboard = get_dashboard_record(db, source.id)
         config = dashboard_config(dashboard)
         timestamp = manual_requested_at or scheduled_time(scheduled_second)
-        if repair_frame is not None and slot is not None and slot.manual_observed_at is not None:
-            observed_at = slot.manual_observed_at.replace(tzinfo=timezone.utc)
+        if repair_frame is not None and slot is not None:
+            observation = slot.manual_observed_at or db.scalar(
+                select(func.min(PlaybackOffer.offered_at)).where(
+                    PlaybackOffer.device_id == device.id,
+                    PlaybackOffer.scheduled_second == slot.scheduled_second,
+                    PlaybackOffer.frame_id == repair_frame.frame_id,
+                )
+            )
+            if observation is not None:
+                observed_at = observation.replace(tzinfo=timezone.utc)
         observed_at = observed_at or _utc_now()
         widgets = resolve_widget_text(
             db, config, timestamp, device, observed_at=observed_at,
@@ -456,15 +465,19 @@ def _prepare_slot(
         if repair_frame is not None and slot is not None:
             if slot.render_key != _render_key(version):
                 original_config = dashboard_config(dashboard, historical=True)
-                for render_version in ("dev23", "dev20", "previous", "legacy"):
+                candidates = chain(
+                    (("dev24", layout) for layout in dev24_dashboard_configs(dashboard)),
+                    ((revision, original_config) for revision in ("dev23", "dev20", "previous", "legacy")),
+                )
+                for render_version, layout in candidates:
                     historical_widgets = resolve_widget_text(
-                        db, original_config, timestamp, device, observed_at=observed_at, render_version=render_version,
+                        db, layout, timestamp, device, observed_at=observed_at, render_version=render_version,
                         time_kind="manual" if manual_requested_at is not None else "scheduled",
                     )
-                    historical_version = (source.type, source.id, slot.title, original_config,
+                    historical_version = (source.type, source.id, slot.title, layout,
                                           [asdict(widget) for widget in historical_widgets])
                     if slot.render_key == _render_key(historical_version):
-                        config = original_config
+                        config = layout
                         widgets = historical_widgets
                         version = historical_version
                         break

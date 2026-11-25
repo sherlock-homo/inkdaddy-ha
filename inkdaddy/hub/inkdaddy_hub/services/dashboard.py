@@ -209,7 +209,7 @@ def _int_field(mapping: dict[str, Any], key: str, default: int | None) -> int | 
         raise DashboardValidationError(f"{key} must be an integer.") from exc
 
 
-SAMPLE_DASHBOARD = """version: 1
+_DEV24_SAMPLE = """version: 1
 name: Home Overview
 target:
   width: 800
@@ -252,8 +252,20 @@ widgets:
 """
 
 
-# Exact legacy sample layout for repair of a previously offered bitmap.
-HISTORICAL_SAMPLE_DASHBOARD = SAMPLE_DASHBOARD.replace("  - id: weather", """  - id: clock
+SAMPLE_DASHBOARD = _DEV24_SAMPLE + """  - id: date
+    type: entity_state
+    x: 0
+    y: 0
+    w: 2
+    h: 1
+    source:
+      type: date
+    options:
+      label: Date
+"""
+
+# Preserve the pre-dev24 layout so an already offered frame can be reconstructed.
+HISTORICAL_SAMPLE_DASHBOARD = _DEV24_SAMPLE.replace("  - id: weather", """  - id: clock
     type: big_number
     x: 0
     y: 0

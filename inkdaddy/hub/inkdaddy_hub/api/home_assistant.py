@@ -13,7 +13,7 @@ from sqlalchemy.orm import Session
 from ..database import get_db
 from ..models import HAEntityCache, HomeAssistantConfig
 from ..services.dashboard_calendar import fetch_calendar_choices
-from ..services.dashboard_sensors import DASHBOARD_DOMAINS, battery_source, dashboard_eligible, entity_attributes
+from ..services.dashboard_sensors import DASHBOARD_DOMAINS, battery_source, dashboard_eligible, dashboard_report_lifetime, entity_attributes
 from ..services.home_assistant import (
     HA_CONFIG_ID,
     ENTITY_CACHE_DOMAINS,
@@ -249,7 +249,15 @@ def entities(
     else:
         rows = db.scalars(query.limit(limit))
     return {
-        "entities": [_entity_payload(entity) for entity in rows],
+        "entities": [
+            {
+                **_entity_payload(entity),
+                "dashboard_valid_until": (
+                    entity.source_reported_at.replace(tzinfo=timezone.utc) + dashboard_report_lifetime(entity.domain)
+                ).isoformat(),
+            } if purpose == "dashboard" else _entity_payload(entity)
+            for entity in rows
+        ],
         "cached": True,
         "error": None,
     }
