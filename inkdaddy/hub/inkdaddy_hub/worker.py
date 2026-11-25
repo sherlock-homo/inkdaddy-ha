@@ -14,6 +14,7 @@ from .database import SessionLocal, init_db
 from .models import Dashboard, Device, Playback, Setting
 from .services.dashboard_calendar import calendar_connection, calendar_requests, refresh_calendar_cache
 from .services.dashboard_content import SITE_SETTING, dashboard_config
+from .services.dashboard_forecast import forecast_requests, refresh_forecast_cache
 from .services import home_assistant
 from .services.playback import begin_playback_write, prune_playback, refresh_playback_slots
 from .services.updates import run_auto_update_cycle
@@ -49,10 +50,10 @@ def refresh_home_assistant() -> None:
             else:
                 db.add(Setting(key=SITE_SETTING, value_json=json.dumps(site_data)))
         db.commit()
-    refresh_dashboard_calendars()
+    refresh_dashboard_sources()
 
 
-def refresh_dashboard_calendars() -> None:
+def refresh_dashboard_sources() -> None:
     with SessionLocal() as db:
         devices = db.scalars(select(Device).where(Device.provisioned.is_(True))).all()
         selected = {
@@ -64,10 +65,17 @@ def refresh_dashboard_calendars() -> None:
             Playback.device_id.in_(device.id for device in devices)
         )):
             selected.update(item["id"] for item in json.loads(playlist) if item["type"] == "dashboard")
-        layouts = db.scalars(select(Dashboard).where(Dashboard.slug.in_(selected)))
-        requests = {request for layout in layouts for request in calendar_requests(dashboard_config(layout))}
+        layouts = db.scalars(select(Dashboard).where(Dashboard.slug.in_(selected))).all()
+        configs = [dashboard_config(layout) for layout in layouts]
+        if "sample" in selected and all(layout.slug != "sample" for layout in layouts):
+            configs.append(dashboard_config(None))
+        requests = {request for config in configs for request in calendar_requests(config)}
+        forecasts = {place for config in configs for place in forecast_requests(config)}
+        engine = db.get_bind()
         connection, scope = calendar_connection(db) if requests else (None, None)
-    refresh_calendar_cache(connection, scope, requests, datetime.now(timezone.utc))
+    now = datetime.now(timezone.utc)
+    refresh_forecast_cache(engine, forecasts, now)
+    refresh_calendar_cache(connection, scope, requests, now)
 
 
 def run_playback_cycle(now: datetime | None = None) -> None:
@@ -104,7 +112,7 @@ def run(stop_event: threading.Event, *, refresh_at_start: bool = True) -> None:
         if now - last_ha_refresh >= HA_REFRESH_SECONDS:
             last_ha_refresh = now
             refresh_home_assistant()
-        refresh_dashboard_calendars()
+        refresh_dashboard_sources()
         run_playback_cycle()
         if now - last_update_check >= interval:
             last_update_check = now

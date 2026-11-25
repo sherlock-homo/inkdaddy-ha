@@ -440,7 +440,7 @@ def test_paused_manual_dashboard_refresh_uses_new_date_and_repairs_exact_bitmap(
     config = dashboard_config(None)
     widgets = resolve_widget_text(db, config, requested, device, observed_at=rendered_at, time_kind="manual")
     assert widgets[0].value == "Sunny"
-    assert (widgets[2].value, widgets[2].detail) == ("84%", "Last reported")
+    assert (widgets[2].value, widgets[2].detail) == ("84%", "")
     exact, _ = raw_frame_from_image(playback.render_dashboard(config, widgets), dither=True)
     assert offer.payload == exact
     frame_path = Path(db.scalar(select(Frame.path).where(Frame.frame_id == offer.frame_id)))
@@ -452,13 +452,15 @@ def test_paused_manual_dashboard_refresh_uses_new_date_and_repairs_exact_bitmap(
         assert frame_path.read_bytes() == exact
 
 
-@pytest.mark.parametrize("render_version", ["dev24", "dev23", "dev20", "previous", "legacy"])
+@pytest.mark.parametrize("render_version", ["dev25", "dev24", "dev23", "dev20", "previous", "legacy"])
 def test_existing_dashboard_offer_keeps_its_original_bitmap_after_clock_update(catalog, render_version, monkeypatch):
     db, device, _photo = catalog
     device.battery_percent = 84
     hour = playback.epoch_second(NOW.replace(minute=0))
     timestamp = NOW.replace(minute=0)
     config = dashboard_config(None, historical=True)
+    if render_version == "dev25":
+        config = next(playback.dev25_dashboard_configs(None))
     if render_version == "dev24":
         config["widgets"] = [w for w in config["widgets"] if w["source"]["type"] != "clock"]
         db.add(HAEntityCache(entity_id="weather.hourly", domain="weather", state="rainy",
@@ -473,7 +475,7 @@ def test_existing_dashboard_offer_keeps_its_original_bitmap_after_clock_update(c
     if render_version == "dev20":
         assert widgets[0].detail == "For Wed, Nov 18"
         assert widgets[3].detail == "Last reported"
-    image = playback.render_dashboard(config, widgets)
+    image = playback.render_legacy_dashboard(config, widgets)
     exact, sha = raw_frame_from_image(image, dither=True)
     frame = playback._store_frame(db, exact, image, playback.Source("dashboard", "sample"))
     slot = PlaybackSlot(
@@ -887,7 +889,8 @@ def test_color_upgrade_keeps_old_offer_and_rebuilds_future_photo(catalog, monkey
     assert Path(frame.path).read_bytes() == original_offer.payload
 
 
-def test_matter_delivery_keeps_confirmed_offer_when_source_no_longer_matches(catalog):
+@pytest.mark.parametrize("with_snapshot", [True, False])
+def test_matter_delivery_keeps_confirmed_offer_when_source_no_longer_matches(catalog, with_snapshot):
     db, device, _photo = catalog
     initial = prepare_matter_frame(db, device.device_uid, now=NOW)
     assert record_matter_frame_receipt(
@@ -902,11 +905,19 @@ def test_matter_delivery_keeps_confirmed_offer_when_source_no_longer_matches(cat
     path = Path(db.scalar(select(Frame.path).where(Frame.frame_id == initial.frame_id)))
     path.write_bytes(initial.payload[:64])
 
-    with pytest.raises(MatterFrameError, match="original frame can no longer be regenerated"):
-        prepare_matter_frame(db, device.device_uid, now=NOW, repair_cache=True)
+    if with_snapshot:
+        restored = prepare_matter_frame(db, device.device_uid, now=NOW, repair_cache=True)
+        assert restored.payload == initial.payload and restored.acknowledged
+        assert path.read_bytes() == initial.payload
+    else:
+        slot = db.get(PlaybackSlot, (device.id, playback.epoch_second(initial.scheduled_at)))
+        slot.dashboard_render_json = None
+        db.flush()
+        with pytest.raises(MatterFrameError, match="original frame can no longer be regenerated"):
+            prepare_matter_frame(db, device.device_uid, now=NOW, repair_cache=True)
+        assert path.read_bytes() == initial.payload[:64]
 
     assert playback_status(db, device, NOW)["current"] == current
-    assert path.read_bytes() == initial.payload[:64]
 
 
 def test_manual_refresh_restores_a_damaged_generated_file(catalog):

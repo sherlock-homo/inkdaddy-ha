@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import re
+from http.client import HTTPException as HTTPClientError
 from datetime import datetime, timezone
 from typing import Any
 
@@ -15,6 +16,7 @@ from ..database import get_db
 from ..models import Dashboard, DashboardVersion, Device, Photo
 from ..services.dashboard import (
     DashboardValidationError,
+    DEV25_SAMPLE_DASHBOARD,
     HISTORICAL_SAMPLE_DASHBOARD,
     SAMPLE_DASHBOARD,
     load_dashboard_yaml,
@@ -30,6 +32,7 @@ from ..services.dashboard_content import (
     resolve_widget_text,
 )
 from ..services.dashboard_calendar import calendar_connection, calendar_requests, refresh_calendar_cache
+from ..services.dashboard_forecast import forecast_requests, location_choices, refresh_forecast_cache
 from ..services.photos import load_color_managed_photo
 from ..services.playback import begin_playback_write, playlist_uses_dashboard
 from ..services.rendering import render_preview_png_bytes
@@ -96,6 +99,7 @@ def create_dashboard(
     record = Dashboard(name=name, slug=slug, current_yaml=raw_yaml)
     db.add(record)
     db.commit()
+    refresh_forecast_cache(db.get_bind(), forecast_requests(config), datetime.now(timezone.utc))
     return _payload(record)
 
 
@@ -128,13 +132,26 @@ def set_photo_overlay(
     device = db.scalar(select(Device).where(Device.device_uid == device_uid))
     if device is None:
         raise HTTPException(status_code=404, detail="Display not found.")
+    places = set()
     if payload.dashboard_id not in (None, PHOTO_DETAILS_OVERLAY):
         config = dashboard_config(_find(db, payload.dashboard_id))
+        places = forecast_requests(config)
         if not config["widgets"]:
             raise HTTPException(status_code=422, detail="Add a widget to this dashboard before using it over photos.")
     device.overlay_dashboard_id = payload.dashboard_id
     db.commit()
+    refresh_forecast_cache(db.get_bind(), places, datetime.now(timezone.utc))
     return {"device_uid": device.device_uid, "dashboard_id": device.overlay_dashboard_id}
+
+
+@router.get("/forecast/locations")
+def forecast_locations(query: str = Query(min_length=2, max_length=80)) -> dict[str, object]:
+    if len(query.strip()) < 2 or not query.isprintable():
+        raise HTTPException(status_code=422, detail="Enter a city name.")
+    try:
+        return {"locations": location_choices(query)}
+    except (OSError, ValueError, RecursionError, HTTPClientError):
+        raise HTTPException(status_code=503, detail="Forecast city search is temporarily unavailable.") from None
 
 
 @router.get("/{dashboard_id}")
@@ -152,17 +169,23 @@ def update_dashboard(
     config = _parse(raw_yaml)
     name = str(payload.get("name") or config.get("name") or dashboard_id).strip()[:255]
     previous = record.current_yaml if record else HISTORICAL_SAMPLE_DASHBOARD
+    prior_layout = record.current_yaml if record else DEV25_SAMPLE_DASHBOARD
     if record is None:
         record = Dashboard(slug=dashboard_id, name=name, current_yaml=raw_yaml)
         db.add(record)
     else:
         record.name = name
         record.current_yaml = raw_yaml
+    # The first edit after upgrade can change the inputs of a dev.25 offer.
+    # New dashboard offers carry their resolved widget snapshot in their slot.
+    if prior_layout != raw_yaml and not any(v.version_number == 25 for v in record.versions):
+        record.versions.append(DashboardVersion(version_number=25, yaml=prior_layout))
     # Keep the pre-removal layout for exact repair of a previously offered image.
     # New layouts cannot contain a clock, so this archives at most one such copy.
     if editable_dashboard_yaml(previous) != previous:
         record.versions.append(DashboardVersion(version_number=0, yaml=previous))
     db.commit()
+    refresh_forecast_cache(db.get_bind(), forecast_requests(config), datetime.now(timezone.utc))
     return _payload(record)
 
 
@@ -199,6 +222,17 @@ def preview_dashboard(
 
 
 def _preview(db: Session, config: dict[str, Any], device_uid: str | None, photo_id: int | None = None) -> Response:
+    now = datetime.now(timezone.utc)
+    places = forecast_requests(config)
+    requests = calendar_requests(config)
+    if places or requests:
+        engine = db.get_bind()
+        connection, scope = calendar_connection(db) if requests else (None, None)
+        # The layout and connection are copied values. Release the read
+        # transaction before waiting for provider data or updating its cache.
+        db.close()
+        refresh_forecast_cache(engine, places, now)
+        refresh_calendar_cache(connection, scope, requests, now)
     device = (
         db.scalar(select(Device).where(Device.device_uid == device_uid)) if device_uid else None
     )
@@ -214,10 +248,6 @@ def _preview(db: Session, config: dict[str, Any], device_uid: str | None, photo_
             raise HTTPException(status_code=404, detail="Photo preview unavailable.")
         if image.size != (800, 480):
             image = image.resize((800, 480), Image.Resampling.LANCZOS)
-    now = datetime.now(timezone.utc)
-    if requests := calendar_requests(config):
-        connection, scope = calendar_connection(db)
-        refresh_calendar_cache(connection, scope, requests, now)
     widgets = resolve_widget_text(db, config, now, device, time_kind="preview", photo=photo)
     image = PhotoOverlay(config, widgets).render(image) if image else render_dashboard(config, widgets)
     return Response(

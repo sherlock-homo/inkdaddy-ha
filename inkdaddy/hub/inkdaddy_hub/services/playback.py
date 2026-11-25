@@ -35,11 +35,17 @@ from ..models import (
 )
 from .asset_storage import asset_names, asset_stat, read_asset, remove_asset, write_asset
 from .dashboard_content import (
+    AgendaText,
+    ForecastDay,
+    ForecastText,
     PhotoOverlay,
+    WidgetText,
     dashboard_config,
     dev24_dashboard_configs,
+    dev25_dashboard_configs,
     get_dashboard_record,
     render_dashboard,
+    render_legacy_dashboard,
     resolve_widget_text,
     resolve_photo_overlay,
 )
@@ -400,6 +406,28 @@ def repair_playback_frame(db: Session, device: Device, slot: PlaybackSlot, frame
     if slot.source_type == "photo":
         _repair_photo_frame(db, slot, frame)
         return
+    if slot.dashboard_render_json:
+        # A date, forecast or battery reading may change during a transfer.
+        # Recompose exactly what the offer contained, even after the owner edits the layout.
+        try:
+            snapshot = json.loads(slot.dashboard_render_json)
+            widgets = []
+            for tile, values in zip(snapshot["config"]["widgets"], snapshot["widgets"], strict=True):
+                if "days" in values:
+                    values["days"] = tuple(ForecastDay(**day) for day in values["days"])
+                    widgets.append(ForecastText(**values))
+                elif tile["source"].get("type") == "calendar":
+                    widgets.append(AgendaText(**values))
+                else:
+                    widgets.append(WidgetText(**values))
+            image = render_dashboard(snapshot["config"], widgets)
+        except (KeyError, IndexError, TypeError, AttributeError) as exc:
+            raise ValueError("The saved dashboard snapshot is invalid.") from exc
+        raw, digest = raw_frame_from_image(image, dither=True)
+        if digest != frame.sha256 or digest[:24] != frame.frame_id:
+            raise ValueError("The saved dashboard no longer matches its offer.")
+        _store_frame(db, raw, image, Source(slot.source_type, slot.source_id))
+        return
     manual_requested_at = _manual_request_at(db.get(Playback, device.id), slot.scheduled_second)
     _prepare_slot(
         db, device, slot.scheduled_second, Source(slot.source_type, slot.source_id),
@@ -423,6 +451,8 @@ def _prepare_slot(
     photo_metadata = asset_stat(data_dir, "processed", photo.processed_path) if photo else None
     overlay = None
     overlay_snapshot = None
+    dashboard_snapshot = None
+    painter = render_dashboard
     version: tuple[object, ...]
     if photo and photo_metadata:
         title = photo.original_filename
@@ -461,11 +491,13 @@ def _prepare_slot(
             time_kind="manual" if manual_requested_at is not None else "scheduled",
         )
         title = dashboard.name if dashboard else str(config.get("name", "Home Overview"))
-        version = (source.type, source.id, title, config, [asdict(widget) for widget in widgets])
+        dashboard_snapshot = {"config": config, "widgets": [asdict(widget) for widget in widgets]}
+        version = ("color-dashboard-v1", source.type, source.id, title, dashboard_snapshot)
         if repair_frame is not None and slot is not None:
             if slot.render_key != _render_key(version):
                 original_config = dashboard_config(dashboard, historical=True)
                 candidates = chain(
+                    (("dev25", layout) for layout in dev25_dashboard_configs(dashboard)),
                     (("dev24", layout) for layout in dev24_dashboard_configs(dashboard)),
                     ((revision, original_config) for revision in ("dev23", "dev20", "previous", "legacy")),
                 )
@@ -480,6 +512,7 @@ def _prepare_slot(
                         config = layout
                         widgets = historical_widgets
                         version = historical_version
+                        painter = render_legacy_dashboard
                         break
 
     render_key = _render_key(version)
@@ -517,7 +550,7 @@ def _prepare_slot(
             image = _framed_photo(image, overlay)
             raw, checksum = raw_photo_frame(image)
         else:
-            image = render_dashboard(config, widgets)
+            image = painter(config, widgets)
             raw, checksum = raw_frame_from_image(image, dither=True)
         if repair_frame is not None:
             if checksum != repair_frame.sha256 or checksum[:24] != repair_frame.frame_id:
@@ -535,6 +568,7 @@ def _prepare_slot(
     slot.frame_id = frame.frame_id
     slot.render_key = render_key
     slot.retained_offer_id = None
+    slot.dashboard_render_json = json.dumps(dashboard_snapshot) if dashboard_snapshot is not None else None
     slot.photo_render_json = (
         json.dumps({"processed_path": photo.processed_path, "overlay": overlay_snapshot})
         if photo and photo_metadata else None

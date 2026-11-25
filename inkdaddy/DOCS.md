@@ -13,6 +13,14 @@ Open **inkDaddy → Updates → Manage app in Home Assistant** to install an ava
 
 The same tab lists the firmware versions Home Assistant has recorded for registered inkDaddy displays. Select a display to open its native device page. Its Matter controller handles signed firmware updates over Thread.
 
+## Dashboard design and weather
+
+The starter dashboard places the date and current conditions across the top, with the display battery and the seven-day forecast below. The battery graphic fills to the reported percentage. The current weather tile uses your selected Home Assistant weather entity.
+
+In **Dashboards**, open **Dashboard colors** and choose a scheme or select a primary and accent ink individually. **Preview** shows the layout before you save. To change the weekly forecast, select its tile, use **Find a city**, choose a result and set °F or °C. Save the dashboard to apply it. Existing custom layouts can add a **7-day forecast** from the widget picker.
+
+The weekly forecast uses the chosen city’s local dates. City searches go to Open-Meteo’s geocoder and weather requests send the selected coordinates and time zone. The app caches successful forecasts for three hours and can use a complete cached week for up to 24 hours during an outage. Highs and lows are rounded and daily weather codes are drawn as icons. The free API supports personal, noncommercial use. [Open-Meteo](https://open-meteo.com/), [GeoNames](https://www.geonames.org/), [CC BY 4.0](https://creativecommons.org/licenses/by/4.0/).
+
 ## Photos and overlays
 
 - To alternate between the playlist and a full-screen dashboard, open **Devices**, choose **Alternate photos and dashboard**, select the dashboard, and **Save schedule**. The cycle length covers both halves. For example, 60 minutes gives each photo 30 minutes and each dashboard 30 minutes. The next photo follows playlist order. A photo can still have its own overlay.

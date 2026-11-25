@@ -1,3 +1,8 @@
+## 0.2.0-dev.26
+
+- Home Overview pairs a large typeset date with illustrated current weather. The battery gauge fills with the reported percentage, and a seven-day forecast starts in Atlanta.
+- Choose a forecast city and temperature unit in the widget editor. Set each dashboard’s primary and accent inks under **Dashboard colors**.
+
 ## 0.2.0-dev.25
 
 - Restore the local **Date** tile where the original Home Status clock left an empty space. Custom layouts keep their chosen tiles.

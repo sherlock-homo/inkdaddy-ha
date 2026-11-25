@@ -31,6 +31,7 @@ from inkdaddy_hub.database import Base, get_db
 from inkdaddy_hub.models import (
     Device,
     DeviceStatusHistory,
+    ForecastCache,
     Frame,
     HAEntityCache,
     MatterFrameBinding,
@@ -43,6 +44,7 @@ from inkdaddy_hub.services.dashboard_content import (
     render_dashboard,
     resolve_widget_text,
 )
+from inkdaddy_hub.services.dashboard_forecast import forecast_place
 from inkdaddy_hub.services.matter_controller import MatterController
 from inkdaddy_hub.services.matter_frame_broker import (
     prepare_matter_frame,
@@ -186,6 +188,14 @@ def test_first_frame_for_new_link_uses_local_home_overview(peer, packing, app_ca
     route = f"/api/devices/{uid}/playback"
     with sessions() as db:
         device_id = db.scalar(select(Device.id).where(Device.device_uid == uid))
+        place = next(forecast_place(w["source"]) for w in dashboard_config(None)["widgets"]
+                     if w["source"]["type"] == "forecast")
+        days = [{"date": (NOW.date() + timedelta(days=i)).isoformat(), "high": 60 + i,
+                 "low": 43 + i, "condition": "rainy"} for i in range(7)]
+        db.add(ForecastCache(key=place.key, fetched_at=NOW.replace(tzinfo=None),
+                             retry_at=(NOW + timedelta(hours=3)).replace(tzinfo=None),
+                             days_json=json.dumps(days)))
+        db.commit()
     assert response_json(client.get(route))["playlist"] == []
 
     metadata_requested = threading.Event()
@@ -255,8 +265,9 @@ def test_first_frame_for_new_link_uses_local_home_overview(peer, packing, app_ca
             widgets = resolve_widget_text(
                 db, config, NOW.replace(minute=0), db.get(Device, device_id), observed_at=clock.now
             )
-            assert [widget.value for widget in widgets[:2]] == ["Partly cloudy", "Test House"]
-            assert widgets[0].detail == "16 °C"
+            weather, forecast = widgets[:2]
+            assert (weather.value, weather.detail) == ("Partly cloudy", "16 °C")
+            assert forecast.value == "Atlanta, GA" and [day.high for day in forecast.days] == list(range(60, 67))
             expected, _digest = raw_frame_from_image(render_dashboard(config, widgets), dither=True)
         expect_download(software, attempt.transfer_id, expected, packing=packing)
         software.call("display", transfer_id=attempt.transfer_id)

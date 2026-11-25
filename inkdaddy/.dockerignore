@@ -19,6 +19,8 @@
 !hub/inkdaddy_hub/
 !hub/inkdaddy_hub/**/
 !hub/inkdaddy_hub/**/*.py
+!hub/inkdaddy_hub/fonts/BricolageGrotesque.ttf
+!hub/inkdaddy_hub/fonts/OFL.txt
 !matter_controller/
 !matter_controller/package.json
 !matter_controller/package-lock.json

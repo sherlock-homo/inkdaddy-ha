@@ -46,6 +46,7 @@ def init_db() -> None:
                 "retained_offer_id": "INTEGER",
                 "manual_observed_at": "TIMESTAMP",
                 "photo_render_json": "TEXT",
+                "dashboard_render_json": "TEXT",
             },
         }
         for table, additions in migrations.items():

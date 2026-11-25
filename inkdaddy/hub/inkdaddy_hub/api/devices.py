@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import json
-from datetime import datetime
+from datetime import datetime, timezone
 
 from fastapi import APIRouter, Depends, HTTPException, Response
 from sqlalchemy import delete, func, select
@@ -19,7 +19,8 @@ from ..models import (
     PlaybackOffer,
     PlaybackSlot,
 )
-from ..services.dashboard_content import get_dashboard_record
+from ..services.dashboard_content import dashboard_config, get_dashboard_record
+from ..services.dashboard_forecast import ForecastPlace, forecast_requests, refresh_forecast_cache
 from ..services.frame_pipeline import prepare_device_frame, render_device_image
 from ..services.home_assistant import supervisor_connection
 from ..services.matter_delivery import queue_playback_mirror
@@ -160,6 +161,15 @@ def get_device(device_id: str, db: Session = Depends(get_db)) -> dict[str, objec
     return _device_payload(_get_device(db, device_id))
 
 
+def _assigned_forecasts(db: Session, dashboard_ids: set[str]) -> set[ForecastPlace]:
+    places = set()
+    for slug in dashboard_ids:
+        record = get_dashboard_record(db, slug)
+        if record is not None or slug == "sample":
+            places.update(forecast_requests(dashboard_config(record)))
+    return places
+
+
 @router.put("/{device_id}")
 def update_device(device_id: str, payload: dict[str, object], db: Session = Depends(get_db)) -> dict[str, object]:
     if supervisor_connection() is not None and set(payload) - MANAGED_DEVICE_FIELDS:
@@ -173,11 +183,18 @@ def update_device(device_id: str, payload: dict[str, object], db: Session = Depe
         payload = {**payload, "name": name.strip()}
     previous_schedule = (device.refresh_interval_minutes, device.interlace_dashboard_id)
     _apply_device_payload(db, device, payload)
+    assigned = set()
     if previous_selection != (device.selected_source_type, device.selected_source_id):
         reset_selection(db, device)
+        if device.selected_source_type == "dashboard":
+            assigned.add(device.selected_source_id or "sample")
     if device.provisioned and (device.refresh_interval_minutes, device.interlace_dashboard_id) != previous_schedule:
         refresh_playback_slots(db, device)
+        if device.interlace_dashboard_id:
+            assigned.add(device.interlace_dashboard_id)
+    places = _assigned_forecasts(db, assigned)
     db.commit()
+    refresh_forecast_cache(db.get_bind(), places, datetime.now(timezone.utc))
     db.refresh(device)
     return _device_payload(device)
 
@@ -326,7 +343,10 @@ def save_playback(device_id: str, payload: dict[str, object], db: Session = Depe
     except ValueError as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
     refresh_playback_slots(db, device)
+    playlist = json.loads(db.get(Playback, device.id).playlist_json)
+    places = _assigned_forecasts(db, {item["id"] for item in playlist if item["type"] == "dashboard"})
     db.commit()
+    refresh_forecast_cache(db.get_bind(), places, datetime.now(timezone.utc))
     return playback_status(db, device)
 
 

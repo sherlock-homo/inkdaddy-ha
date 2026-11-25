@@ -138,3 +138,26 @@
   .dd-editor-footer > .primary-button { width: 100%; }
   .dd-overlay-settings label { flex: 1; }
 }
+
+.dd-colors { min-width: 0; border-block: 1px solid var(--dd-line); }
+.dd-colors summary { padding: 13px 2px; color: var(--dd-ink); cursor: pointer; font-size: 14px; }
+.dd-colors summary strong { margin-inline: 4px 12px; }
+.dd-color-swatch { display: inline-block; vertical-align: middle; width: 16px; height: 16px; border-radius: 50%; box-shadow: inset 0 0 0 1px #21152e35; }
+.dd-color-swatch + .dd-color-swatch { margin-left: -3px; }
+.dd-color-summary { margin-left: 6px; color: var(--dd-muted); font-size: 12px; }
+.dd-color-controls, .dd-forecast-settings { display: grid; gap: 9px; min-width: 0; }
+.dd-color-controls { padding: 0 2px 13px; }
+.dd-color-controls label { display: grid; gap: 4px; color: var(--dd-ink); font-size: 12px; font-weight: 700; }
+.dd-color-controls select { min-height: 42px; width: 100%; padding: 7px 9px; border: 1px solid #ded4ef; border-radius: 8px; background: #fff; }
+.dd-color-schemes { display: flex; flex-wrap: wrap; gap: 5px; }
+.dd-color-schemes button { min-height: 38px; padding: 5px 11px; border: 1px solid var(--dd-line); border-radius: 20px; background: #fff; color: var(--dd-ink); cursor: pointer; font-size: 12px; }
+.dd-color-schemes button[aria-pressed=true] { border-color: var(--dd-accent); background: var(--dd-accent-pale); }
+.dd-canvas[data-photo=false] .dd-tile[data-kind=date] { background: color-mix(in srgb, var(--tile-primary) 15%, white); }
+.dd-canvas[data-photo=false] .dd-tile[data-kind=forecast] { background: color-mix(in srgb, var(--tile-accent) 29%, white); }
+.dd-widget-symbol[data-kind=forecast] { background: #fbeaa4; color: #64501d; }
+.dd-preset-diagram[data-preset=home] i { grid-column: span 2; }
+.dd-city-choice { font-size: 13px; color: var(--dd-ink); overflow-wrap: anywhere; }
+.dd-city-field { display: grid; gap: 4px; }
+.dd-city-search { display: grid; grid-template-columns: minmax(0, 1fr) auto; align-items: center; gap: 5px; }
+.dd-forecast-settings .dd-entity-results button { display: block; }
+.dd-forecast-settings a { color: var(--dd-accent); }

@@ -52,6 +52,15 @@ class HAEntityCache(Base, TimestampMixin):
     attributes_json: Mapped[str] = mapped_column(Text, default="{}", nullable=False)
 
 
+class ForecastCache(Base):
+    __tablename__ = "forecast_cache"
+
+    key: Mapped[str] = mapped_column(String(160), primary_key=True)
+    fetched_at: Mapped[datetime | None] = mapped_column(DateTime)
+    retry_at: Mapped[datetime] = mapped_column(DateTime, nullable=False)
+    days_json: Mapped[str | None] = mapped_column(Text)
+
+
 class Dashboard(Base, TimestampMixin):
     __tablename__ = "dashboards"
 
@@ -217,6 +226,7 @@ class PlaybackSlot(Base):
     retained_offer_id: Mapped[int | None] = mapped_column(Integer)
     manual_observed_at: Mapped[datetime | None] = mapped_column(DateTime)
     photo_render_json: Mapped[str | None] = mapped_column(Text)
+    dashboard_render_json: Mapped[str | None] = mapped_column(Text)
 
 
 class PlaybackOffer(Base):

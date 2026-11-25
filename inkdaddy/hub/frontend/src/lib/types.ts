@@ -112,7 +112,11 @@ export interface DashboardWidget {
   options?: { label?: string; text?: string; unit?: string } & Record<string, unknown>;
 }
 
+export type PanelColor = "black" | "white" | "red" | "yellow" | "green" | "blue";
+export type DashboardTheme = { primary: PanelColor; accent: PanelColor };
+
 export interface DashboardConfig {
+  theme?: Partial<DashboardTheme>;
   name: string;
   widgets: DashboardWidget[];
   grid: { cols: number; rows: number };

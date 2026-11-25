@@ -1,5 +1,6 @@
 import { useEffect, useState } from "react";
 import { apiJson } from "../lib/api";
+import { atlantaForecast, ForecastSettings } from "./ForecastSettings";
 import type { DashboardWidget, HAEntity } from "../lib/types";
 
 export const widgetKinds = {
@@ -8,6 +9,7 @@ export const widgetKinds = {
   calendar: { name: "Upcoming events", subtitle: "The next 24 hours on a Home Assistant calendar", symbol: "▤" },
   location: { name: "Location", subtitle: "Home Assistant site or a selected zone", symbol: "⌖" },
   weather: { name: "Weather", subtitle: "Current conditions from Home Assistant", symbol: "☁" },
+  forecast: { name: "7-day forecast", subtitle: "Daily highs and lows for a city", symbol: "◒" },
   device_battery: { name: "Display battery", subtitle: "This display or a Home Assistant battery", symbol: "▰" },
   home_assistant: { name: "Home Assistant sensor", subtitle: "A recently reported measurement", symbol: "≋" },
   text: { name: "Text note", subtitle: "A message that stays put", symbol: "Aa" }
@@ -74,10 +76,14 @@ export function createWidget(kind: WidgetKind, tile: Tile, widgets: DashboardWid
   const ids = new Set(widgets.map((item) => item.id));
   let id = base;
   for (let suffix = 2; ids.has(id); suffix++) id = `${base}-${suffix}`;
+  const weatherTile = kind === "weather" || kind === "forecast";
   const type = kind === "calendar" ? "agenda" : kind === "text" ? "text_note" :
-    kind === "weather" && fits(widgets, tile, 2, 1) ? "weather_summary" : "entity_state";
-  const w = (kind === "calendar" || kind === "weather") && fits(widgets, tile, 2, 1) ? 2 : 1;
+    weatherTile ? "weather_summary" : "entity_state";
+  const w = (kind === "calendar" || weatherTile) && fits(widgets, tile, 2, 1) ? 2 : 1;
   const h = 1;
+  if (kind === "forecast") {
+    return { ...tile, id, type, w, h, source: { ...atlantaForecast }, options: {} };
+  }
   if (kind === "photo_metadata") {
     return { ...tile, id, type, w, h, source: { type: kind, field: "date_taken" }, options: {} };
   }
@@ -87,8 +93,9 @@ export function createWidget(kind: WidgetKind, tile: Tile, widgets: DashboardWid
 }
 
 export const dashboardPresets: Record<string, { name: string; detail: string; widgets: [WidgetKind, Tile, number?][] }> = {
-  home: { name: "Daily overview", detail: "Date, weather, location and battery", widgets: [
-    ["date", { x: 0, y: 0 }], ["weather", { x: 1, y: 0 }], ["device_battery", { x: 3, y: 0 }], ["location", { x: 0, y: 1 }, 2]
+  home: { name: "Daily overview", detail: "Date, weather, battery and 7-day forecast", widgets: [
+    ["date", { x: 0, y: 0 }, 2], ["weather", { x: 2, y: 0 }, 2],
+    ["device_battery", { x: 0, y: 1 }, 2], ["forecast", { x: 2, y: 1 }, 2]
   ] },
   glance: { name: "At a glance", detail: "Date and display battery", widgets: [
     ["date", { x: 0, y: 0 }, 2], ["device_battery", { x: 2, y: 0 }]
@@ -295,6 +302,7 @@ export function WidgetSettings({ widget, widgets, disabled, onChange, onRemove }
     {(kind === "home_assistant" || kind === "weather" || kind === "device_battery" || kind === "location") && <EntityPicker kind={kind}
       selected={displayText(widget.source?.entity_id)} disabled={disabled}
       onChange={(entityId) => onChange({ ...widget, source: { ...widget.source, entity_id: entityId || undefined } })} />}
+    {kind === "forecast" && <ForecastSettings widget={widget} disabled={disabled} onChange={onChange} />}
     {kind === "calendar" && <>
       <CalendarPicker selected={displayText(widget.source?.entity_id)} disabled={disabled}
         onChange={(entityId) => onChange({ ...widget, source: { ...widget.source, entity_id: entityId || undefined },

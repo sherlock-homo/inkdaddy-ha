@@ -1,5 +1,13 @@
 # inkDaddy Home Assistant repository checklist
 
+## Color dashboard and weekly forecast
+
+- [ ] Design the local date, condition-specific weather tiles and proportional battery graphic for the six-color panel. Check text contrast and small tiles.
+- [ ] Add a configurable seven-day forecast, defaulting to Atlanta, with local dates, units, caching and missing-data handling.
+- [ ] Add per-dashboard primary and accent colors, preserve editable layouts and remove redundant status copy.
+- [ ] Set the starter layout to date and weather above battery and forecast. Apply it to the owner's saved dashboard without changing the photo overlay or schedule.
+- [ ] Review and test the renderer, editor, old frame recovery and upgrade. Publish the app and verify the actual dashboard sent over Matter.
+
 ## Dashboard date, weather, and photo overlay repair
 
 - [x] Restore the local date in the legacy starter dashboard and check older frame receipts.

@@ -6,6 +6,7 @@ import {
   createWidget, dashboardPresets, displayText, presetWidgets, tiles, WidgetGallery, WidgetSettings, WidgetSymbol, widgetAt, widgetKind,
   widgetKinds, widgetTitle, type Tile, type WidgetKind
 } from "./DashboardWidgets";
+import { DashboardColors, dashboardColorStyle, defaultTheme } from "./DashboardColors";
 import { ResizeHandles } from "./DashboardResize";
 import "./dashboards.css";
 
@@ -249,6 +250,7 @@ function DashboardEditor({ dashboard, devices, heading, onSave, onDelete, restor
   const kind = widget && widgetKind(widget);
   const vacant = tiles.find((position) => !widgetAt(draft.widgets, position));
   const occupied = draft.widgets.reduce((sum, item) => sum + item.w * item.h, 0);
+  const theme = { ...defaultTheme, ...draft.theme };
   const dirty = JSON.stringify(draft) !== JSON.stringify(savedConfig);
   const deviceUid = chosenDevice ?? (devices.length === 1 ? devices[0].device_uid : "");
   const photoId = chosenPhoto ?? photos[0]?.id;
@@ -389,6 +391,7 @@ function DashboardEditor({ dashboard, devices, heading, onSave, onDelete, restor
           }}><span className="dd-preset-diagram" data-preset={id} aria-hidden="true"><i /><i /><i /><i /></span>
             <span><strong>{preset.name}</strong><small>{preset.detail}</small></span></button>)}</div>
         </section>}
+        <DashboardColors theme={theme} disabled={Boolean(busy)} onChange={(colors) => change({ ...draft, theme: { ...draft.theme, ...colors } })} />
         <div className="dd-builder">
           <section className="dd-layout" aria-labelledby="dd-layout-title">
             <div className="dd-section-heading">
@@ -397,19 +400,20 @@ function DashboardEditor({ dashboard, devices, heading, onSave, onDelete, restor
                 onClick={() => { if (vacant) selectTile(vacant); }}>Add widget</button>
             </div>
             <div className="dd-canvas" aria-label="Dashboard tile layout" data-photo={Boolean(previewPhoto?.preview_url)}
-              style={previewPhoto?.preview_url ? { backgroundImage: `url("${apiPath(previewPhoto.preview_url)}")` } : undefined}>
+              style={{ ...dashboardColorStyle(theme), backgroundImage: previewPhoto?.preview_url ? `url("${apiPath(previewPhoto.preview_url)}")` : undefined }}>
               {tiles.map((position) => {
                 const item = widgetAt(draft.widgets, position);
                 if (item && (item.x !== position.x || item.y !== position.y)) return null;
                 const kind = item ? widgetKind(item) : undefined;
-                const note = kind === "text" ? displayText(item?.options?.text) : "";
+                const detail = kind === "forecast" ? displayText(item?.source?.location) :
+                  kind === "text" ? displayText(item?.options?.text) : "";
                 return <div className="dd-tile-cell" key={item ? `widget:${item.id}` : `empty:${position.x}:${position.y}`}
                   style={{ gridColumn: `${position.x + 1} / span ${item?.w ?? 1}`, gridRow: `${position.y + 1} / span ${item?.h ?? 1}` }}>
                   <button type="button" className="dd-tile" data-filled={Boolean(item)} data-kind={kind}
                   aria-pressed={position.x === tile.x && position.y === tile.y} disabled={Boolean(busy)}
                   aria-label={`${item ? widgetTitle(item) : "Add widget"}, row ${position.y + 1}, column ${position.x + 1}`}
                   onClick={() => item ? setTile(position) : selectTile(position)}>
-                  {item ? <><WidgetSymbol kind={kind} /><strong>{widgetTitle(item)}</strong>{note && <small>{note}</small>}</> :
+                  {item ? <><WidgetSymbol kind={kind} /><strong>{widgetTitle(item)}</strong>{detail && <small>{detail}</small>}</> :
                     <span className="dd-empty-tile" aria-hidden="true">+</span>}
                   </button>
                   {item && item === widget && <ResizeHandles widget={item} widgets={draft.widgets}

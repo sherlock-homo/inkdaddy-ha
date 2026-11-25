@@ -15,6 +15,7 @@ GRID_ROWS = 2
 MAX_YAML_BYTES = 64 * 1024
 MAX_YAML_EVENTS = 4096
 MAX_YAML_DEPTH = 32
+PANEL_COLOR_NAMES = frozenset({"black", "white", "green", "blue", "red", "yellow"})
 PHOTO_METADATA_FIELDS = ("date_taken", "years_ago", "location")
 
 EDITOR_SPANS = {(w, h) for w in range(1, GRID_COLS + 1) for h in range(1, GRID_ROWS + 1)}
@@ -106,6 +107,14 @@ def validate_dashboard_config(config: dict[str, Any], *, historical: bool = Fals
     if (cols, rows) != (GRID_COLS, GRID_ROWS):
         raise DashboardValidationError("inkDaddy v1 supports only a 4x2 tile grid.")
 
+    if "theme" in config and not historical:
+        theme = config["theme"]
+        if not isinstance(theme, dict) or any(
+            not isinstance(color, str) or color not in PANEL_COLOR_NAMES
+            for key, color in theme.items() if key in ("primary", "accent")
+        ):
+            raise DashboardValidationError("Choose a panel ink for each dashboard color.")
+
     widgets = config.get("widgets", [])
     if not isinstance(widgets, list):
         raise DashboardValidationError("widgets must be a list.")
@@ -160,6 +169,13 @@ def validate_widget(widget: dict[str, Any], *, index: int, cols: int, rows: int,
         if not isinstance(normalized[field], dict):
             raise DashboardValidationError(f"Widget {widget_id} {field} must be a mapping.")
     source = normalized["source"]
+    if source.get("type") == "forecast":
+        from .dashboard_forecast import forecast_place
+
+        try:
+            forecast_place(source)
+        except ValueError as exc:
+            raise DashboardValidationError(str(exc)) from exc
     if source.get("type") == "clock" and not historical:
         raise DashboardValidationError("Clock widgets are no longer available.")
     if source.get("type") in ("location", "device_battery") and "entity_id" in source and not historical:
@@ -252,7 +268,7 @@ widgets:
 """
 
 
-SAMPLE_DASHBOARD = _DEV24_SAMPLE + """  - id: date
+DEV25_SAMPLE_DASHBOARD = _DEV24_SAMPLE + """  - id: date
     type: entity_state
     x: 0
     y: 0
@@ -276,3 +292,44 @@ HISTORICAL_SAMPLE_DASHBOARD = _DEV24_SAMPLE.replace("  - id: weather", """  - id
     options:
       label: Local time
   - id: weather""", 1)
+
+# Keep the previous starter above for byte-exact retries of pre-upgrade offers.
+SAMPLE_DASHBOARD = """version: 1
+name: Home Overview
+theme: {primary: blue, accent: yellow}
+target: {width: 800, height: 480, palette: waveshare_7color_6}
+grid: {cols: 4, rows: 2}
+widgets:
+  - id: weather
+    type: weather_summary
+    x: 2
+    y: 0
+    w: 2
+    h: 1
+    source: {type: weather}
+    options: {label: Weather}
+  - id: forecast
+    type: weather_summary
+    x: 2
+    y: 1
+    w: 2
+    h: 1
+    source: {type: forecast, location: 'Atlanta, GA', latitude: 33.749, longitude: -84.388, timezone: America/New_York}
+    options: {label: 7-day forecast}
+  - id: battery
+    type: big_number
+    x: 0
+    y: 1
+    w: 2
+    h: 1
+    source: {type: device_battery}
+    options: {label: Battery}
+  - id: date
+    type: entity_state
+    x: 0
+    y: 0
+    w: 2
+    h: 1
+    source: {type: date}
+    options: {label: Date}
+"""

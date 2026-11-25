@@ -421,3 +421,16 @@ def test_date_on_dashboard_and_preview_rolls_over_at_home_assistant_midnight(cat
         assert resolve_widget_text(db, config, after, None, observed_at=before) == wednesday
         preview = dashboards.preview_dashboard("cards", device_uid=None, photo_id=None, db=db)
         assert preview.body == render_preview_png_bytes(render_dashboard(config, tuesday))
+
+
+def test_pre_palette_theme_metadata_can_be_opened_and_replaced(catalog):
+    with catalog() as db:
+        config = {"name": "Archive", "widgets": [DATE], "theme": "classic"}
+        db.add(Dashboard(slug="archive", name="Archive", current_yaml=json.dumps(config)))
+        db.flush()
+        result = dashboards.get_dashboard("archive", db)
+        assert result["config"]["theme"] == {}
+        assert json.loads(result["yaml"])["theme"] == {}
+        config["theme"] = {"primary": "red", "accent": "white"}
+        saved = dashboards.update_dashboard("archive", {"yaml": json.dumps(config)}, db)
+        assert saved["config"]["theme"] == config["theme"]

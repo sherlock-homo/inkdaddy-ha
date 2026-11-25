@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "inkdaddy"
-version = "0.2.0.dev25"
+version = "0.2.0.dev26"
 description = "Local-first smart ePaper display hub for Proxmox and XIAO MG24 displays"
 readme = "README.md"
 requires-python = ">=3.11"
@@ -36,6 +36,9 @@ app-build = ["pip", "setuptools>=69", "wheel"]
 
 [tool.setuptools]
 package-dir = {"" = "hub"}
+
+[tool.setuptools.package-data]
+inkdaddy_hub = ["fonts/BricolageGrotesque.ttf", "fonts/OFL.txt"]
 
 [tool.setuptools.packages.find]
 where = ["hub"]
