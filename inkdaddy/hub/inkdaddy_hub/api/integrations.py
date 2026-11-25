@@ -33,7 +33,7 @@ def list_integrations(db: Session = Depends(get_db)) -> dict[str, object]:
                 "configured": ha_configured,
                 "enabled": ha_enabled,
                 "entity_count": ha_entities,
-                "manage_url": "#home-assistant",
+                "manage_url": "#integrations/home-assistant",
             },
             {
                 "id": "inkdaddy_devices",
@@ -50,7 +50,7 @@ def list_integrations(db: Session = Depends(get_db)) -> dict[str, object]:
                 "status": "managed_by_home_assistant" if managed is not None else "diagnostics_required",
                 "configured": None if managed is not None else False,
                 "enabled": None if managed is not None else False,
-                "manage_url": "/config/thread" if managed is not None else "#diagnostics",
+                "manage_url": "/config/thread" if managed is not None else "#settings/diagnostics",
             },
         ]
     }

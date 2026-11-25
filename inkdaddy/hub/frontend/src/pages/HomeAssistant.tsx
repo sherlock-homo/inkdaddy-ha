@@ -56,7 +56,7 @@ export function HomeAssistantPage() {
         const result = await apiJson<{ entities: HAEntity[] }>(`/api/home-assistant/entities?${query}`, { signal: controller.signal });
         if (!controller.signal.aborted) setEntities(result.entities);
       } catch {
-        if (!controller.signal.aborted) setResultsError("Unable to load cached entities.");
+        if (!controller.signal.aborted) setResultsError("Unable to load entities.");
       } finally {
         if (!controller.signal.aborted) setLoadingEntities(false);
       }
@@ -76,7 +76,7 @@ export function HomeAssistantPage() {
       });
       setConfig(payload);
       setToken("");
-      setMessage("Home Assistant configuration saved.");
+      setMessage("Connection saved.");
       setResultsRevision((revision) => revision + 1);
     } catch {
       setMessage("Unable to save the connection. Check the URL and access token.");
@@ -90,9 +90,9 @@ export function HomeAssistantPage() {
     try {
       const payload = await apiJson<{ error?: string | null }>("/api/home-assistant/entities/refresh", { method: "POST" });
       if (payload.error) {
-        setMessage("Home Assistant could not refresh the entity cache.");
+        setMessage("Unable to refresh Home Assistant entities.");
       } else {
-        setMessage("Home Assistant entities refreshed.");
+        setMessage("Entities refreshed.");
         setResultsRevision((revision) => revision + 1);
         await loadConfig();
       }
@@ -106,22 +106,19 @@ export function HomeAssistantPage() {
   return (
     <div className="page-grid">
       <header className="page-header">
-        <div>
-          <h1>Home Assistant</h1>
-          <p>Manage the Home Assistant entities available to your dashboards.</p>
-        </div>
-        <span className={`status-badge ${config?.configured ? "status-good" : "status-warn"}`}>
-          {config?.configured ? (managed ? "Managed by Supervisor" : "Configured") : config ? "Connection unavailable" : "Checking connection"}
-        </span>
+        <h1>Home Assistant</h1>
+        {config && <span className={`status-badge ${config.configured ? "status-good" : "status-warn"}`}>
+          {config.configured ? "Configured" : "Setup needed"}
+        </span>}
       </header>
 
       {configError && <div className="button-row"><p role="alert">{configError}</p>
         <button className="secondary-button" onClick={() => void loadConfig()}>Retry connection check</button>
       </div>}
-      <section className="settings-grid">
+      <section>
         {managed ? (
           <section className="workflow-panel form-stack">
-            <div className="preview-toolbar"><h2>Home Assistant app connection</h2></div>
+            <h2>Connection</h2>
             <dl className="mini-list">
               <div><dt>Location</dt><dd>{config.location_name ?? "Unavailable"}</dd></div>
               <div><dt>Time zone</dt><dd>{config.time_zone ?? "Unavailable"}</dd></div>
@@ -133,6 +130,7 @@ export function HomeAssistantPage() {
           </section>
         ) : config ? <div className="workflow-panel">
           <div className="form-stack">
+            <h2>Connection</h2>
             <label>
               Home Assistant URL
               <input value={baseUrl} onChange={(event) => setBaseUrl(event.target.value)} />
@@ -145,40 +143,31 @@ export function HomeAssistantPage() {
             </label>
             <div className="button-row">
               {config.token_page_url && <a className="secondary-link" href={config.token_page_url} target="_blank" rel="noreferrer">
-                Open token page
+                Get access token
               </a>}
               <button className="primary-button" disabled={busy} onClick={() => void save()}>
-                {busy ? "Working..." : "Save and validate"}
+                {busy ? "Working…" : "Save connection"}
               </button>
               <button className="secondary-button" disabled={busy || !config?.configured} onClick={() => void refresh()}>
                 Refresh entities
               </button>
             </div>
+            {config.last_validated_at && <p className="muted-text">Last checked {new Date(config.last_validated_at).toLocaleString()}</p>}
             {message && <p className="muted-text" role="status">{message}</p>}
           </div>
         </div> : !configError && <p className="muted-text" role="status">Loading connection…</p>}
 
-        <div className="info-panel vertical">
-          <h2>Cache</h2>
-          <div className="row-item">
-            <span>Entities</span>
-            <strong>{config?.entity_count ?? entities.length}</strong>
-          </div>
-          {!managed && <div className="row-item">
-            <span>Last validated</span>
-            <strong>{config?.last_validated_at ? new Date(config.last_validated_at).toLocaleString() : "Never"}</strong>
-          </div>}
-        </div>
       </section>
 
-      <section className="workflow-panel">
+      <section className="workflow-panel form-stack">
+        <h2>Entities{config && ` (${config.entity_count})`}</h2>
         <div className="form-row">
           <label>
             Search
             <input value={search} onChange={(event) => setSearch(event.target.value)} placeholder="temperature, door, light..." />
           </label>
           <label>
-            Domain
+            Entity type
             <select value={domain} onChange={(event) => setDomain(event.target.value)}>
               <option value="">All</option>
               {domains.map((item) => (
@@ -193,21 +182,20 @@ export function HomeAssistantPage() {
         {resultsError && <div className="button-row"><p role="alert">{resultsError}</p>
           <button className="secondary-button" onClick={() => setResultsRevision((revision) => revision + 1)}>Retry search</button>
         </div>}
-        {loadingEntities && <p role="status">Searching cached entities…</p>}
-        {!loadingEntities && !resultsError && entities.length === 100 && <p className="muted-text">Showing 100 results. Narrow your search to see fewer.</p>}
+        {loadingEntities && <p role="status">Searching entities…</p>}
+        {!loadingEntities && !resultsError && entities.length === 100 && <p className="muted-text">Showing the first 100 results.</p>}
         {!loadingEntities && !resultsError && entities.map((entity) => (
           <div className="table-row" key={entity.entity_id}>
             <div>
               <strong>{entity.name ?? entity.entity_id}</strong>
-              <span>{entity.entity_id}</span>
+              {entity.name && entity.name !== entity.entity_id && <span>{entity.entity_id}</span>}
             </div>
-            <span className="status-badge status-neutral">{entity.domain}</span>
             <strong>{entity.state ?? "unknown"}</strong>
           </div>
         ))}
         {!loadingEntities && !resultsError && !entities.length && (
           <section className="empty-state compact">
-            <h2>{search || domain ? "No matching entities" : "No cached entities"}</h2>
+            <h2>{search || domain ? "No matching entities" : "No entities yet"}</h2>
             <p>{search || domain ? "Try a different search." : "Refresh entities to make them available in dashboards."}</p>
           </section>
         )}

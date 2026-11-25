@@ -1,5 +1,12 @@
 # inkDaddy Home Assistant repository checklist
 
+## Simpler app navigation
+
+- [ ] Gather playback, photos, dashboards, integrations, devices and settings into six main tabs with working links to the moved tools.
+- [ ] Bring the integration request form in line with the other cards and remove test records and delivery details from the everyday view.
+- [ ] Trim redundant copy and preserve onboarding, feedback, retry actions and troubleshooting.
+- [ ] Verify navigation, deep links and mobile layout, publish the app and check the installed version.
+
 ## Color dashboard and weekly forecast
 
 - [x] Design the local date, condition-specific weather tiles and proportional battery graphic for the six-color panel. Check text contrast and small tiles.

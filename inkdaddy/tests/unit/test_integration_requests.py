@@ -67,6 +67,20 @@ def test_request_stays_local_without_configuration_and_deduplicates(queue_client
         assert db.get(delivery.IntegrationRequest, row["integration_id"]).status == "queued"
 
 
+def test_request_form_status_only_returns_the_requested_receipt(queue_client):
+    client, _ = queue_client
+    base = "/api/integration-requests"
+    client.post(base, json={"integration_name": "Existing Request"})
+    receipt = client.post(base, json={"integration_name": "New Request"}).json()["request"]
+    assert client.get(f"{base}/status").json() == {"relay": "unconfigured", "request": None}
+    assert client.get(f"{base}/status", params={"integration_id": receipt["integration_id"]}).json() == {
+        "relay": "unconfigured", "request": receipt,
+    }
+    for missing in ("bad-id", "0" * 32):
+        assert client.get(f"{base}/status", params={"integration_id": missing}).status_code == 404
+    assert len(client.get(base).json()["requests"]) == 2
+
+
 def test_delivery_retries_and_sends_only_the_two_public_fields(queue_client, monkeypatch):
     client, _sessions = queue_client
     monkeypatch.setenv(delivery.URL_ENV, URL)

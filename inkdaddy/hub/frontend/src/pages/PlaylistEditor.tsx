@@ -85,8 +85,8 @@ export function PlaylistEditor({ path, playlist, alternating, defaultSource, ini
   return (
     <div className="form-stack playlist-editor">
       <p className="muted-text">{alternating
-        ? "Add photos or albums to choose the photo order. A full-screen dashboard appears between photos."
-        : "The display cycles through these items at its refresh interval. An empty playlist uses its selected source."}</p>
+        ? "A dashboard appears between photos."
+        : "An empty playlist uses the display’s selected source."}</p>
       {entries.length > 0 && (
         <ol className="playlist-list">
           {entries.map((entry, index) => {
@@ -108,7 +108,7 @@ export function PlaylistEditor({ path, playlist, alternating, defaultSource, ini
         Add to playlist
         <select value="" disabled={busy || loading || !addable.length || entries.length >= 100} onChange={(event) => add(event.target.value)}>
           <option value="">{loading ? "Loading choices…" : alternating
-            ? addable.length ? "Choose a photo or album" : "Upload photos in Manage Photos"
+            ? addable.length ? "Choose a photo or album" : "Upload photos in Photos"
             : "Choose a dashboard, album, or photo"}</option>
           {addable.map((item) => <option value={sourceKey(item)} key={sourceKey(item)}>{item.title} ({item.type})</option>)}
         </select>

@@ -165,10 +165,7 @@ export function Home({ onConnect, preferredUid, onDisplaySelected, playlistSourc
   return (
     <div className="page-grid">
       <header className="page-header">
-        <div>
-          <h1>Display</h1>
-          <p>See what’s on your inkDaddy and choose what plays next.</p>
-        </div>
+        <h1>Displays</h1>
         {devices.length > 1 && (
           <label className="display-picker">
             Display
@@ -181,8 +178,8 @@ export function Home({ onConnect, preferredUid, onDisplaySelected, playlistSourc
             </select>
           </label>
         )}
-        {(!display || !display.provisioned) && (
-          <button className="primary-button" onClick={onConnect}>Connect inkDaddy</button>
+        {registryReady && (!display || !display.provisioned) && (
+          <button className="primary-button" onClick={onConnect}>Connect a display</button>
         )}
       </header>
 
@@ -190,9 +187,9 @@ export function Home({ onConnect, preferredUid, onDisplaySelected, playlistSourc
       {!registryReady && !registryError && <p className="muted-text" role="status">Loading displays…</p>}
       {registryReady && !display && (
         <section className="empty-state compact">
-          <div><h2>No display registered</h2><p>{playlistSource
-            ? "Connect a display before you can add this item to its playlist."
-            : "Connect inkDaddy to start publishing frames."}</p></div>
+          <div><h2>No displays yet</h2>
+            {playlistSource && <p>Connect a display to add this item to its playlist.</p>}
+          </div>
         </section>
       )}
 
@@ -272,7 +269,7 @@ export function Home({ onConnect, preferredUid, onDisplaySelected, playlistSourc
           </div>
 
           <section className="display-details" aria-label="Display status">
-            <span><StatusBadge tone={display.mesh_connected ? "good" : "warn"}>{display.mesh_connected ? "Thread last reported online" : "No recent Thread connection"}</StatusBadge></span>
+            <span><StatusBadge tone={display.mesh_connected ? "good" : "warn"}>{display.mesh_connected ? "Thread online at last check" : "No recent Thread connection"}</StatusBadge></span>
             <span><strong>Battery</strong> {display.battery_percent == null ? "Unavailable" : `${Math.round(display.battery_percent)}%`}</span>
             <span><strong>Last seen</strong> {display.last_seen_at ? formatDate(display.last_seen_at) : "Never"}</span>
           </section>

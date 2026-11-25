@@ -19,11 +19,10 @@ function dashboardError(reason: unknown, fallback: string) {
   if (!(reason instanceof Error)) return fallback;
   try {
     const detail = JSON.parse(reason.message)?.detail;
-    if (typeof detail === "string") return detail;
+    return typeof detail === "string" && detail.trim() ? detail : fallback;
   } catch {
-    return reason.message;
+    return fallback;
   }
-  return reason.message;
 }
 
 export function DashboardsPage({ draft, onDraftChange }: {
@@ -49,8 +48,8 @@ export function DashboardsPage({ draft, onDraftChange }: {
       if (controller.signal.aborted) return;
       setItems(dashboards);
       setReady(true);
-    }).catch((reason: Error) => {
-      if (!controller.signal.aborted) setError(reason.message);
+    }).catch(() => {
+      if (!controller.signal.aborted) setError("Unable to load dashboards. Try again later.");
     });
     apiJson<{ devices: DeviceRecord[] }>("/api/devices", options).then(({ devices: next }) => {
       if (!controller.signal.aborted) setDevices(next);
@@ -91,7 +90,10 @@ export function DashboardsPage({ draft, onDraftChange }: {
     setError("");
     try {
       const yaml = await file.text();
-      if (!yaml.trim()) throw new Error("The dashboard file is empty.");
+      if (!yaml.trim()) {
+        setError("The dashboard file is empty.");
+        return;
+      }
       const dashboard = await apiJson<DashboardRecord>("/api/dashboards/import", { method: "POST", body: JSON.stringify({ yaml }) });
       setItems((previous) => [...previous, dashboard]);
       setMessage(`${dashboard.name} imported.`);
@@ -112,7 +114,7 @@ export function DashboardsPage({ draft, onDraftChange }: {
 
   return <div className="page-grid dd-page">
     <header className="page-header">
-      <div><h1>Dashboards</h1><p>Build a screen with live Home Assistant data.</p></div>
+      <h1>Dashboards</h1>
       <div className="form-row">
         <button className="secondary-button" disabled={!ready || importing} onClick={() => importInput.current?.click()}>
           {importing ? "Importing…" : "Import YAML"}
@@ -138,12 +140,8 @@ export function DashboardsPage({ draft, onDraftChange }: {
         </button>)}</div>
         {!items.length && !error && <p className="dd-hint">{ready ? "No dashboards yet." : "Loading dashboards…"}</p>}
       </section>
-      {editing ? <DashboardEditor key={active?.id ?? "new"} dashboard={active} devices={devices} heading={editorHeading} onSave={saved}
-        onDelete={remove} restored={restored} onDraftChange={onDraftChange} onClose={close} /> : <section className="dd-empty workflow-panel">
-        <h2>What’s on your display?</h2>
-        <p>Open a saved dashboard or start with a layout you can make your own.</p>
-        <button className="secondary-button" onClick={() => open(null)}>Create a dashboard</button>
-      </section>}
+      {editing && <DashboardEditor key={active?.id ?? "new"} dashboard={active} devices={devices} heading={editorHeading} onSave={saved}
+        onDelete={remove} restored={restored} onDraftChange={onDraftChange} onClose={close} />}
     </div>
   </div>;
 }
@@ -180,7 +178,7 @@ function PhotoOverlaySettings({ devices, dashboards }: { devices: DeviceRecord[]
       });
       setAssignments((previous) => [...(previous ?? []).filter((row) => row.device_uid !== deviceUid), assignment]);
       setDraft(undefined);
-      setStatus(layout ? "Overlay saved for future photo refreshes." : "Future photos will show without an overlay.");
+      setStatus(layout ? "Overlay saved for the next photo." : "Photo overlay removed.");
     } catch (reason) {
       setError(dashboardError(reason, "Unable to change the photo overlay."));
     } finally {
@@ -189,10 +187,7 @@ function PhotoOverlaySettings({ devices, dashboards }: { devices: DeviceRecord[]
   }
 
   return <section className="workflow-panel dd-overlay-settings" aria-labelledby="dd-photo-overlay-heading">
-    <div>
-      <h2 id="dd-photo-overlay-heading">Photo overlays</h2>
-      <p>Show capture details or a saved dashboard over each photo. In alternating mode, overlays appear during the photo half.</p>
-    </div>
+    <h2 id="dd-photo-overlay-heading">Photo overlays</h2>
     <form className="form-row" onSubmit={(event) => void save(event)}>
       <label>Display<select aria-label="Display" value={deviceUid} disabled={saving} onChange={(event) => {
         setSelectedDevice(event.target.value); setDraft(undefined); setError(""); setStatus("");
@@ -213,8 +208,7 @@ function PhotoOverlaySettings({ devices, dashboards }: { devices: DeviceRecord[]
       </button>
     </form>
     {layout === photoDetailsOverlay && <p className="dd-hint">
-      Shows the date taken, photo age, and available place name or rounded coordinates in the lower left.
-      Photos without these details appear without a caption.
+      Shows the date taken, age, and place name or rounded coordinates when available.
     </p>}
     {error && <p className="warning-text" role="alert">{error}</p>}
     {status && <p className="preview-message" role="status">{status}</p>}
@@ -343,15 +337,12 @@ function DashboardEditor({ dashboard, devices, heading, onSave, onDelete, restor
       const response = await apiFetch("/api/dashboards/preview", {
         method: "POST", headers: { "Content-Type": "application/json" }, body: configPayload(true), signal: controller.signal
       });
-      if (!response.ok) {
-        const payload: { detail?: unknown } = await response.json().catch(() => ({}));
-        throw new Error(typeof payload.detail === "string" ? payload.detail : "Unable to render the preview.");
-      }
-      if (!response.headers.get("content-type")?.startsWith("image/")) throw new Error("The preview did not return an image.");
+      if (!response.ok) throw new Error(await response.text());
+      if (!response.headers.get("content-type")?.startsWith("image/")) throw new Error();
       const content = await response.blob();
       if (!controller.signal.aborted) setPreviewUrl(URL.createObjectURL(content));
     } catch (reason) {
-      if (!controller.signal.aborted) setError(reason instanceof Error ? reason.message : "Unable to render the preview.");
+      if (!controller.signal.aborted) setError(dashboardError(reason, "Unable to render the preview."));
     } finally {
       if (!controller.signal.aborted) setBusy(null);
     }

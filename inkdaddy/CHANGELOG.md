@@ -1,3 +1,8 @@
+## 0.2.0-dev.27
+
+- Six main tabs group related tools. Connect a display under **Devices**, manage Home Assistant under **Integrations**, and find updates and diagnostics under **Settings**.
+- The integration request form now matches the other cards and shows feedback for the request you just made.
+
 ## 0.2.0-dev.26
 
 - Home Overview pairs a large typeset date with illustrated current weather. The battery gauge fills with the reported percentage, and a seven-day forecast starts in Atlanta.

@@ -86,9 +86,9 @@ export function Connect({ onOpenDisplay }: { onOpenDisplay: (uid: string) => voi
       });
       if (node.linked && node.device_uid) {
         setLinkedUid(node.device_uid);
-        setMessage("Secure Matter delivery is enabled.");
+        setMessage("Display connected.");
       } else {
-        setMessage("The display has been shared. Check connections, then link it when its identity appears.");
+        setMessage("Display shared. Check connections, then choose Link display.");
       }
       await load();
     } catch (error) {
@@ -150,7 +150,6 @@ export function Connect({ onOpenDisplay }: { onOpenDisplay: (uid: string) => voi
           disabled={busy || !matter?.available}
           maxLength={515}
           spellCheck={false}
-          placeholder="Paste the Matter sharing code"
         />
       </label>
       <div className="button-row">
@@ -164,17 +163,14 @@ export function Connect({ onOpenDisplay }: { onOpenDisplay: (uid: string) => voi
   return (
     <div className="page-grid">
       <header className="page-header">
-        <div>
-          <h1>Connect a display</h1>
-          <p>Pair inkDaddy with Home Assistant, then enable secure delivery over Thread.</p>
-        </div>
+        <h1>Connect a display</h1>
       </header>
 
       <section className="connect-flow">
         <div className="qr-card">
           <div>
             <h2>Pair in Home Assistant</h2>
-            <p>Add a Matter device in the Home Assistant mobile app. Scan the QR code on the ePaper display.</p>
+            <p>In the Home Assistant mobile app, add a Matter device and scan the code on your display.</p>
             <div className="button-row">
               <button className="secondary-button" disabled={busy} onClick={() => void checkConnections()}>Check connections</button>
             </div>
@@ -200,7 +196,6 @@ export function Connect({ onOpenDisplay }: { onOpenDisplay: (uid: string) => voi
                 <details><summary>Use a sharing code</summary>{codeForm}</details>
               </>
             ) : <>
-              {discoveryAvailable === true && <p>Newly paired displays appear here after you check connections.</p>}
               {discoveryAvailable === false && <p>Automatic discovery is unavailable. You can use a sharing code.</p>}
               {codeForm}
             </>}
@@ -215,7 +210,7 @@ export function Connect({ onOpenDisplay }: { onOpenDisplay: (uid: string) => voi
         <p role={failed ? "alert" : "status"}>{message}</p>
         {firstFrameStatus && <p role="status">{firstFrameStatus}</p>}
         {linkedUid && <div className="button-row">
-          <button className="primary-button" onClick={() => onOpenDisplay(linkedUid)}>Open Display</button>
+          <button className="primary-button" onClick={() => onOpenDisplay(linkedUid)}>Open display</button>
         </div>}
       </section>}
 
@@ -230,27 +225,26 @@ export function Connect({ onOpenDisplay }: { onOpenDisplay: (uid: string) => voi
               </button>
             </div>
           ))}
-          {waiting && <p>Waiting for a shared device to report its inkDaddy identity.</p>}
+          {waiting && <p>Waiting for the shared display…</p>}
         </section>
       )}
 
-      <section className="info-panel vertical">
-        <h2>Your displays</h2>
+      {registeredDisplays.length > 0 && <section className="info-panel vertical">
+        <h2>Connected displays</h2>
         {registeredDisplays.map((device) => (
           <div className="row-item" key={device.device_uid}>
             <strong>{device.name}</strong>
             <div className="button-row">
-              <button className="secondary-button" onClick={() => onOpenDisplay(device.device_uid)}>Open Display</button>
+              <button className="secondary-button" onClick={() => onOpenDisplay(device.device_uid)}>Open display</button>
               {matterDisplays.has(device.device_uid) && haDisplays.some((row) => row.device_uid === device.device_uid) && (
                 <button className="secondary-button" disabled={busy} onClick={() => void setupButtons(device.device_uid)}>
-                  Set up HA playback buttons
+                  Set up playback buttons
                 </button>
               )}
             </div>
           </div>
         ))}
-        {registeredDisplays.length === 0 && <p>No display has connected yet.</p>}
-      </section>
+      </section>}
     </div>
   );
 }

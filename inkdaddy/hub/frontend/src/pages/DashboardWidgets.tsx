@@ -171,10 +171,10 @@ function EntityPicker({ kind, selected, disabled, onChange }: {
         setAsOf(Date.now());
         setEntities(result.entities);
         setError(result.error ?? "");
-      } catch (reason) {
+      } catch {
         if (!controller.signal.aborted) {
           setEntities([]);
-          setError(reason instanceof Error ? reason.message : "Unable to load entities.");
+          setError("Unable to load entities.");
         }
       } finally {
         if (!controller.signal.aborted) setLoading(false);

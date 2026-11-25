@@ -181,7 +181,7 @@ export function PhotosPage({ onAddToPlaylist }: { onAddToPlaylist: (source: Play
   const photoNames = new Map(photos.map((photo) => [photo.id, photo.original_filename]));
 
   return <div className="page-grid">
-    <header className="page-header"><div><h1>Photos</h1><p>Upload photos, organize albums, and add them to a display playlist.</p></div></header>
+    <header className="page-header"><h1>Photos</h1></header>
     <section className="workflow-panel form-stack">
       <div className="form-row">
         <label>Framing
@@ -218,15 +218,15 @@ export function PhotosPage({ onAddToPlaylist }: { onAddToPlaylist: (source: Play
 
     <section className="content-layout photo-library">
       <aside className="side-stack photo-actions">
-        <section className="info-panel vertical">
-          <h2>Selected photos</h2><p>{selected.size} selected</p>
+        {selected.size > 0 && <section className="info-panel vertical">
+          <h2>{selected.size} {selected.size === 1 ? "photo" : "photos"} selected</h2>
           <div className="button-row">
-            <button className="secondary-button" disabled={controlsBusy || !selected.size || Boolean(draft)}
+            <button className="secondary-button" disabled={controlsBusy || Boolean(draft)}
               onClick={() => setDraft({ id: null, name: "", photoIds: [...selected] })}>Create album</button>
             {selectedPhoto && <button className="secondary-button" disabled={controlsBusy || Boolean(draft)}
               onClick={() => onAddToPlaylist({ type: "photo", id: selectedPhoto.id })}>Add to playlist</button>}
           </div>
-        </section>
+        </section>}
         {draft && <form className="info-panel vertical" onSubmit={(event) => void saveAlbum(event)}>
           <h2>{draft.id ? "Edit album" : "New album"}</h2>
           <label>Album name
@@ -278,7 +278,7 @@ export function PhotosPage({ onAddToPlaylist }: { onAddToPlaylist: (source: Play
               <button className="secondary-button" type="button" disabled={controlsBusy} onClick={() => setRenaming(null)}>Cancel</button>
             </div>
           </form> : <>
-            <div className="asset-meta"><strong>{photo.original_filename}</strong><span>{photo.frame_url ? "Ready" : "Frame unavailable"}</span></div>
+            <div className="asset-meta"><strong>{photo.original_filename}</strong>{!photo.frame_url && <span>Frame unavailable</span>}</div>
             <div className="button-row">
               {photo.can_edit_framing && <button className="secondary-button" disabled={controlsBusy}
                 onClick={(event) => {

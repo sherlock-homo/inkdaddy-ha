@@ -29,7 +29,7 @@ export function IntegrationsPage() {
       <p role="status">{message}</p>
       {message.startsWith("Unable") && <button className="secondary-button" onClick={() => void load()}>Retry</button>}
     </div>}
-    <section className="card-grid three">
+    <section className="card-grid">
       {integrations.map((integration) => {
         const thread = integration.id === "thread_border_router";
         const managed = integration.status === "managed_by_home_assistant";
@@ -37,21 +37,31 @@ export function IntegrationsPage() {
           <div className="preview-toolbar">
             <h2>{integration.name}</h2>
             <span className={`status-badge ${integration.configured ? "status-good" : "status-neutral"}`}>
-              {managed ? "Managed by Home Assistant" : thread ? "Externally managed" : integration.configured ? "Configured" : "Setup needed"}
+              {integrationSummary(integration)}
             </span>
           </div>
-          {integration.entity_count !== undefined && <p>{integration.entity_count} cached entities</p>}
-          {integration.device_count !== undefined && <p>{integration.device_count} registered displays</p>}
           <div className="button-row">
             <a className="secondary-link" href={integration.manage_url} target={managed ? "_parent" : undefined}>
-              {managed ? "Open Thread settings" : thread ? "Open Diagnostics" : integration.id === "home_assistant" ? "Open Home Assistant settings" : "Open Devices"}
+              {managed ? "Thread settings" : thread ? "Diagnostics" : integration.id === "home_assistant" ? "Home Assistant settings" : "Manage devices"}
             </a>
           </div>
         </article>;
       })}
+      <IntegrationRequestPanel />
     </section>
-    <IntegrationRequestPanel />
   </div>;
+}
+
+function integrationSummary(integration: IntegrationRecord): string {
+  if (integration.status === "managed_by_home_assistant") return "Managed by Home Assistant";
+  if (integration.id === "thread_border_router") return "External";
+  if (integration.device_count !== undefined) {
+    return `${integration.device_count} ${integration.device_count === 1 ? "display" : "displays"}`;
+  }
+  if (integration.status === "connected" && integration.entity_count !== undefined) {
+    return `${integration.entity_count} ${integration.entity_count === 1 ? "entity" : "entities"}`;
+  }
+  return integration.status === "connected" ? "Connected" : "Setup needed";
 }
 
 type RelayStatus = "ready" | "unconfigured" | "invalid";
@@ -64,147 +74,117 @@ type IntegrationRequest = {
   updated_at: string;
 };
 
-type RequestQueue = { relay: RelayStatus; requests: IntegrationRequest[] };
+type RequestStatus = { relay: RelayStatus; request: IntegrationRequest | null };
 
 function IntegrationRequestPanel() {
   const [name, setName] = useState("");
-  const [queue, setQueue] = useState<RequestQueue | null>(null);
+  const [relay, setRelay] = useState<RelayStatus | null>(null);
+  const [request, setRequest] = useState<IntegrationRequest | null>(null);
+  const [duplicate, setDuplicate] = useState(false);
   const [busy, setBusy] = useState(false);
-  const [message, setMessage] = useState("");
   const [formError, setFormError] = useState("");
   const [loadError, setLoadError] = useState("");
-  const pending = queue?.relay === "ready" &&
-    queue.requests.some(({ status }) => ["queued", "sending", "retrying"].includes(status));
+  const [revision, setRevision] = useState(0);
+  const pendingId = relay === "ready" && request && ["queued", "sending", "retrying"].includes(request.status)
+    ? request.integration_id : null;
 
-  const load = useCallback(async (signal?: AbortSignal) => {
-    try {
-      const latest = await apiJson<RequestQueue>("/api/integration-requests", { signal });
-      if (signal?.aborted) return;
-      setQueue((current) => ({
-        relay: latest.relay,
-        requests: mergeRequests(current?.requests ?? [], latest.requests),
-      }));
-      setLoadError("");
-    } catch {
-      if (!signal?.aborted) setLoadError("Unable to load integration requests.");
+  useEffect(() => {
+    const controller = new AbortController();
+    const path = "/api/integration-requests/status" + (pendingId ? `?integration_id=${pendingId}` : "");
+    async function refresh() {
+      try {
+        const latest = await apiJson<RequestStatus>(path, { signal: controller.signal });
+        if (controller.signal.aborted) return;
+        setRelay(latest.relay);
+        const updated = latest.request;
+        if (updated) setRequest(current =>
+          current?.integration_id === updated.integration_id && updated.updated_at >= current.updated_at ? updated : current);
+        setLoadError("");
+      } catch {
+        if (!controller.signal.aborted) setLoadError(pendingId ? "Couldn’t check request status." : "Couldn’t load the request form.");
+      }
     }
-  }, []);
-
-  useEffect(() => {
-    const controller = new AbortController();
-    void load(controller.signal);
-    return () => controller.abort();
-  }, [load]);
-
-  useEffect(() => {
-    if (!pending) return;
-    const controller = new AbortController();
-    const timer = window.setInterval(() => void load(controller.signal), 4000);
+    void refresh();
+    const timer = pendingId ? window.setInterval(() => void refresh(), 4000) : undefined;
     return () => {
-      window.clearInterval(timer);
       controller.abort();
+      window.clearInterval(timer);
     };
-  }, [pending, load]);
+  }, [pendingId, revision]);
 
   async function submit(event: FormEvent) {
     event.preventDefault();
     if (busy || !name.trim()) return;
     setBusy(true);
     setFormError("");
-    setMessage("");
     try {
-      const { request, duplicate } = await apiJson<{ request: IntegrationRequest; duplicate: boolean }>(
+      const result = await apiJson<{ request: IntegrationRequest; duplicate: boolean }>(
         "/api/integration-requests",
         { method: "POST", body: JSON.stringify({ integration_name: name }) },
       );
-      setQueue((current) => current && ({
-        ...current,
-        requests: mergeRequests(current.requests, [request]),
-      }));
+      setRequest(result.request);
+      setDuplicate(result.duplicate);
+      setLoadError("");
       setName("");
-      setMessage(duplicate ? "This integration was already requested." : "Integration request saved.");
-      void load();
     } catch (error) {
-      setFormError(requestError(error, "Unable to save the request."));
+      setFormError(requestError(error, "Couldn’t save the request. Try again."));
     } finally {
       setBusy(false);
     }
   }
 
-  async function retry(request: IntegrationRequest) {
-    if (busy) return;
+  async function retry() {
+    if (!request || busy) return;
     setBusy(true);
     setFormError("");
-    setMessage("");
     try {
       const updated = await apiJson<IntegrationRequest>(
         `/api/integration-requests/${request.integration_id}/retry`, { method: "POST" },
       );
-      setQueue((current) => current && ({
-        ...current,
-        requests: mergeRequests(current.requests, [updated]),
-      }));
-      setMessage("Request queued for another delivery attempt.");
+      setDuplicate(false);
+      setRequest(updated);
     } catch (error) {
-      setFormError(requestError(error, "Unable to retry delivery."));
+      setFormError(requestError(error, "Couldn’t resend the request. Try again."));
     } finally {
       setBusy(false);
     }
   }
 
-  return <section className="workflow-panel form-stack" aria-labelledby="integration-request-title">
-    <div>
-      <h2 id="integration-request-title">Request Integration</h2>
-      <p>Suggest a Home Assistant integration for inkDaddy. The request contains only the integration name and an identifier derived from it.</p>
-    </div>
-    {queue?.relay === "unconfigured" && <p className="muted-text">Requests stay on this installation until an owner relay is configured.</p>}
-    {queue?.relay === "invalid" && <p className="warning-text">The owner relay configuration needs attention. Requests will stay here meanwhile.</p>}
-    <form className="form-row" onSubmit={(event) => void submit(event)}>
+  return <article className="asset-card integration-card" aria-labelledby="integration-request-title">
+    <div className="preview-toolbar"><h2 id="integration-request-title">Request an integration</h2></div>
+    <form className="form-stack" onSubmit={submit}>
       <label>Integration name
-        <input value={name} maxLength={80} required placeholder="MQTT" disabled={busy || !queue}
+        <input value={name} minLength={2} maxLength={80} required placeholder="e.g. Philips Hue" disabled={busy || !relay}
           onChange={(event) => setName(event.target.value)} />
       </label>
-      <button className="primary-button" disabled={busy || !queue || !name.trim()}>
-        {queue?.relay === "ready" ? "Request integration" : "Save request"}
-      </button>
+      <div className="button-row"><button className="primary-button" disabled={busy || !relay || !name.trim()}>
+        {relay && relay !== "ready" ? "Save request" : "Send request"}
+      </button></div>
     </form>
-    {message && <p role="status">{message}</p>}
+    {relay && relay !== "ready" && !request && <p className="muted-text">Delivery is off. Requests will be saved here.</p>}
+    {request && <div className="button-row">
+      <span role="status">{requestMessage(request, relay, duplicate)}</span>
+      {request.status === "failed" && relay === "ready" &&
+        <button className="secondary-button" disabled={busy} onClick={retry}>Retry delivery</button>}
+    </div>}
     {formError && <p className="warning-text" role="alert">{formError}</p>}
     {loadError && <div className="button-row">
-      <p role="alert">{loadError}</p>
-      <button className="secondary-button" onClick={() => void load()}>Reload requests</button>
+      <span role="alert">{loadError}</span>
+      <button className="secondary-button" disabled={busy} onClick={() => setRevision(revision + 1)}>Retry</button>
     </div>}
-    {queue && queue.requests.length > 0 && <ul className="playlist-list" aria-label="Saved integration requests">
-      {queue.requests.map((request) => <li key={request.integration_id}>
-        <strong>{request.integration_name}</strong>
-        <div className="button-row">
-          <span className={`status-badge ${request.status === "delivered" ? "status-good" : request.status === "failed" ? "status-warn" : "status-neutral"}`}>
-            {deliveryLabel(request.status, queue.relay)}
-          </span>
-          {request.status === "failed" && queue.relay === "ready" && <button className="secondary-button"
-            disabled={busy} onClick={() => void retry(request)}>Retry delivery</button>}
-        </div>
-      </li>)}
-    </ul>}
-  </section>;
+  </article>;
 }
 
-function mergeRequests(saved: IntegrationRequest[], incoming: IntegrationRequest[]): IntegrationRequest[] {
-  const rows = new Map(saved.map((row) => [row.integration_id, row]));
-  incoming.forEach((row) => {
-    const prior = rows.get(row.integration_id);
-    if (!prior || row.updated_at >= prior.updated_at) rows.set(row.integration_id, row);
-  });
-  return [...rows.values()].sort((left, right) => right.updated_at.localeCompare(left.updated_at));
-}
-
-function deliveryLabel(status: DeliveryStatus, relay: RelayStatus): string {
-  switch (status) {
-    case "queued": return relay === "ready" ? "Queued for delivery" : "Saved locally";
-    case "sending": return "Sending to owner relay";
-    case "retrying": return relay === "ready" ? "Delivery will retry" : "Saved locally";
-    case "delivered": return "Accepted by owner relay";
-    case "failed": return "Delivery failed";
+function requestMessage(request: IntegrationRequest, relay: RelayStatus | null, duplicate: boolean): string {
+  const name = request.integration_name;
+  switch (request.status) {
+    case "failed": return `The request for ${name} couldn’t be sent.`;
+    case "delivered": return duplicate ? `${name} was already requested.` : `Request for ${name} sent.`;
+    case "sending": return `Sending the request for ${name}…`;
+    case "retrying": return relay === "ready" ? `Delivery for ${name} is delayed. We'll try again.` : `Request for ${name} saved here.`;
+    case "queued":
+      if (duplicate) return relay === "ready" ? `A request for ${name} is already queued.` : `A request for ${name} is already saved here.`;
+      return relay === "ready" ? `Request for ${name} queued.` : `Request for ${name} saved here.`;
   }
 }
 

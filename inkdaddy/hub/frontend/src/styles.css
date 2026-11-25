@@ -638,7 +638,8 @@ button:disabled {
 
 .table-row {
   display: grid;
-  grid-template-columns: minmax(0, 1fr) auto minmax(90px, auto);
+  grid-template-columns: minmax(0, 1fr) minmax(0, auto);
+  overflow-wrap: anywhere;
   gap: 12px;
   align-items: center;
   padding: 12px;
@@ -655,6 +656,11 @@ button:disabled {
 .integration-card,
 .device-card {
   align-content: start;
+}
+
+.integration-card .preview-toolbar {
+  flex-wrap: wrap;
+  margin-bottom: 0;
 }
 
 .history-list {

@@ -136,7 +136,7 @@ function DeviceCard({ device, dashboards, dashboardError, refreshing, onOpenDisp
   return <article className="asset-card device-card">
     <div className="preview-toolbar">
       <h2>{device.name}</h2>
-      <span className={`status-badge ${device.provisioned ? "status-good" : "status-warn"}`}>{device.provisioned ? "Registered" : "Setup needed"}</span>
+      {!device.provisioned && <span className="status-badge status-warn">Setup needed</span>}
     </div>
     <dl className="mini-list">
       <div><dt>Battery</dt><dd>{device.battery_percent == null ? "Unavailable" : `${Math.round(device.battery_percent)}%`}</dd></div>
@@ -144,7 +144,7 @@ function DeviceCard({ device, dashboards, dashboardError, refreshing, onOpenDisp
       <div><dt>Last seen</dt><dd>{device.last_seen_at ? localDate(device.last_seen_at) : "Never"}</dd></div>
     </dl>
     <div className="button-row">
-      <button className="primary-button" onClick={() => onOpenDisplay(device.device_uid)}>Open Display</button>
+      <button className="primary-button" onClick={() => onOpenDisplay(device.device_uid)}>Open display</button>
       {name === null && <button className="secondary-button" onClick={() => { setRenameMessage(""); setName(device.name); }}>Rename</button>}
     </div>
     {name !== null && <form className="form-stack" onSubmit={(event) => void rename(event)}>

@@ -18,9 +18,8 @@
 .dd-library-mark i:first-child { grid-row: span 2; }
 .dd-library-item strong, .dd-presets strong, .dd-widget-gallery strong, .dd-entity-results strong { display: block; font-size: 13px; line-height: 1.25; }
 .dd-library-item small, .dd-presets small, .dd-widget-gallery small, .dd-entity-results small { display: block; margin-top: 3px; color: var(--dd-muted); font-size: 11px; line-height: 1.3; }
-.dd-empty { min-height: 220px; display: grid; align-content: center; justify-items: start; gap: 10px; padding: clamp(20px, 5vw, 36px); }
-.dd-empty h2, .dd-empty p { margin: 0; }
-.dd-empty p { color: var(--dd-muted); }
+.dd-workspace[data-editing="false"] { grid-template-columns: minmax(0, 1fr); }
+.dd-workspace[data-editing="false"] .dd-library-items { grid-template-columns: repeat(auto-fill, minmax(min(100%, 180px), 1fr)); }
 
 .dd-editor-stack { display: grid; gap: 16px; min-width: 0; }
 .dd-editor { border: 1px solid var(--dd-line); overflow: hidden; border-radius: 17px; background: #fff; min-width: 0; box-shadow: 0 12px 24px #25183e0d; }

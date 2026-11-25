@@ -162,7 +162,7 @@ def test_thread_border_router_reports_home_assistant_management(monkeypatch):
             if item["id"] == "thread_border_router"
         )
         assert standalone_router["status"] == "diagnostics_required"
-        assert standalone_router["manage_url"] == "#diagnostics"
+        assert standalone_router["manage_url"] == "#settings/diagnostics"
 
         monkeypatch.setenv("INKDADDY_HA_MODE", "supervisor")
         monkeypatch.setenv("SUPERVISOR_TOKEN", "private-token")

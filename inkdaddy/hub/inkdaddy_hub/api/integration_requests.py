@@ -26,6 +26,18 @@ def list_requests(db: Session = Depends(get_db)) -> dict[str, object]:
     return {"relay": relay, "requests": [request_payload(row) for row in rows]}
 
 
+@router.get("/status")
+def request_status(integration_id: str | None = None, db: Session = Depends(get_db)) -> dict[str, object]:
+    row = None
+    if integration_id is not None:
+        if INTEGRATION_ID_PATTERN.fullmatch(integration_id):
+            row = db.get(IntegrationRequest, integration_id)
+        if row is None:
+            raise HTTPException(status_code=404, detail="Integration request not found.")
+    relay, _ = relay_config()
+    return {"relay": relay, "request": request_payload(row) if row is not None else None}
+
+
 @router.post("")
 def create_request(payload: NewRequest, db: Session = Depends(get_db)) -> dict[str, object]:
     try:

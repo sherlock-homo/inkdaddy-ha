@@ -1,25 +1,3 @@
-export type RouteKey =
-  | "home"
-  | "connect"
-  | "photos"
-  | "dashboards"
-  | "integrations"
-  | "devices"
-  | "home-assistant"
-  | "settings"
-  | "updates"
-  | "diagnostics";
-
-export interface DisplayStatus {
-  name: string;
-  batteryPercent: number;
-  lastRefresh: string;
-  nextWake: string;
-  activeMode: string;
-  meshConnected: boolean;
-  provisioned: boolean;
-}
-
 export interface PhotoRecord {
   id: string;
   original_filename: string;

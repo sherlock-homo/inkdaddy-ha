@@ -1,0 +1,84 @@
+.nav-list a {
+  text-decoration: none;
+}
+
+.main-panel:focus {
+  outline: none;
+}
+
+.section-links {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+  margin-bottom: 20px;
+  border-bottom: 1px solid #d8cfe5;
+}
+
+.section-links a,
+.section-back {
+  display: inline-flex;
+  align-items: center;
+  min-height: 44px;
+  color: #493071;
+  text-decoration: none;
+  font-weight: 600;
+}
+
+.section-links a {
+  padding: 0 12px;
+  border-bottom: 3px solid transparent;
+}
+
+.section-links a[aria-current] {
+  color: #432292;
+  border-bottom-color: #6f4be8;
+}
+
+.section-back {
+  gap: 6px;
+  margin-bottom: 8px;
+}
+
+.section-back span {
+  font-size: 1.35em;
+}
+
+.section-links a:hover,
+.section-back:hover {
+  text-decoration: underline;
+}
+
+.nav-list a:focus-visible,
+.section-links a:focus-visible,
+.section-back:focus-visible {
+  outline: 2px solid currentColor;
+  outline-offset: -3px;
+}
+
+.connection-warning {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 12px;
+  margin-bottom: 16px;
+}
+
+@media (max-width: 600px) {
+  .app-shell .sidebar {
+    gap: 8px;
+  }
+
+  .sidebar .nav-list {
+    display: grid;
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+    gap: 2px;
+    padding-bottom: 0;
+  }
+
+  .nav-list .nav-item {
+    min-height: 40px;
+    justify-content: center;
+    padding: 0 4px;
+    font-size: 0.9375rem;
+  }
+}
