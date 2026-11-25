@@ -7,8 +7,12 @@
 - [x] Show playback commands as Home Assistant buttons, preserve the working Matter pairing, and explain the endpoint Identify buttons.
 - [x] Resize dashboard widgets by dragging a side on a phone or desktop. Keep keyboard size controls, preserve neighboring tiles, and verify save/reopen.
 - [x] Remove clocks from active layouts and the picker. Add configurable Home Assistant source selection for relevant existing and new widgets.
-- [ ] Check panel partial refresh support. Verify the signed firmware image, deliver it to the paired frame over Thread, and confirm its version and a frame receipt.
-- [ ] Test migration, scheduling, manual commands, and the installed app. Publish the release and verify it in Home Assistant.
+- [x] Check panel partial refresh support. Verify the signed firmware image, deliver it to the paired frame over Thread, and confirm its version and a frame receipt.
+- [x] Test migration, scheduling, manual commands, and the installed app. Publish the release and verify it in Home Assistant.
+
+Dev.24 passed 281 Python tests and six Node tests on the Mac and in the amd64 Home Assistant app package. In an isolated dev.23 upgrade the playlist, queue and current receipt survived, and an 11-minute cycle produced five confirmed test slots spaced exactly 330 seconds apart. Desktop Chrome, mobile Chrome and mobile WebKit exercised widget resizing, collision checks, source selection and save/reopen. The installed app rendered 3 × 2 previews with real Home Assistant sources. Its runtime matched the tested package, and release scans found zero secrets or medium/high Bandit findings.
+
+On the paired battery-powered frame, signed v7 installed over Thread from v6. Home Assistant read back version 7 with all existing fabrics. After activating the 60-minute cycle, Home Assistant’s Next button delivered the selected full-screen dashboard and the frame acknowledged it. Previous returned to the exact original photo, which the frame also confirmed. The upcoming queue resumed with the saved dashboard on the half hour and the next photo on the hour.
 
 ## Photo metadata overlays
 
