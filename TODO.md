@@ -2,10 +2,12 @@
 
 ## Simpler app navigation
 
-- [ ] Gather playback, photos, dashboards, integrations, devices and settings into six main tabs with working links to the moved tools.
-- [ ] Bring the integration request form in line with the other cards and remove test records and delivery details from the everyday view.
-- [ ] Trim redundant copy and preserve onboarding, feedback, retry actions and troubleshooting.
-- [ ] Verify navigation, deep links and mobile layout, publish the app and check the installed version.
+- [x] Gather playback, photos, dashboards, integrations, devices and settings into six main tabs with working links to the moved tools.
+- [x] Bring the integration request form in line with the other cards and remove test records and delivery details from the everyday view.
+- [x] Trim redundant copy and preserve onboarding, feedback, retry actions and troubleshooting.
+- [x] Verify navigation, deep links and mobile layout, publish the app and check the installed version.
+
+Dev.27 passed 308 Python tests and six controller tests locally and in the Home Assistant package. Desktop Chrome and mobile WebKit verified navigation, old bookmarks, browser history, display selection, and the request form. Home Assistant backed up and installed the tested build. The installed form fetched no past requests, and the frame kept its current receipt, playlist and alternating schedule.
 
 ## Color dashboard and weekly forecast
 

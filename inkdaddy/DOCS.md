@@ -5,13 +5,13 @@
 3. Add photos and create dashboards. Pick a layout and add widgets for recent Home Assistant sensor readings, weather, the local date, location, or the display’s battery. Use **Preview** to check how a dashboard will look on the chosen display.
 4. Open **Displays → Edit playlist** to choose what rotates on the frame. The default interval is 60 minutes. To change it, open **Devices**, enter a new interval for the frame, and select **Save schedule**. The Displays tab shows the last confirmed frame and the next five scheduled slots.
 
-Open **Integrations → Home Assistant** to manage the connection and browse entities. For connection troubleshooting, open **Settings → Diagnostics**.
+Open **Integrations → Home Assistant settings** to manage the connection and browse entities. For connection troubleshooting, open **Settings → Diagnostics**.
 
 When upgrading from dev.19 or earlier, keep an app backup with that version. The upgrade converts stored playback times from hours to minutes. To return to the earlier version, restore its matching app backup.
 
 ## Updates
 
-Open **Settings → Updates → Manage app in Home Assistant** to install an available app release or change automatic updates. With remote administrator access to that Home Assistant installation, you can do this away from home. Each installation controls its own updates.
+Open **Settings → Updates**. Choose **Update in Home Assistant** when a release is available, or **Manage app in Home Assistant** to change automatic updates. With remote administrator access to that Home Assistant installation, you can do this away from home. Each installation controls its own updates.
 
 The same tab lists the firmware versions Home Assistant has recorded for registered inkDaddy displays. Select a display to open its native device page. Its Matter controller handles signed firmware updates over Thread.
 
@@ -50,7 +50,7 @@ Photos, settings, and Matter fabric credentials are stored in the app’s `/data
 
 Photo uploads accept JPEG, PNG, WebP and BMP. Each photo is limited to 32 MiB and 50 megapixels, and a batch is limited to 50 photos and 128 MiB. inkDaddy converts supported RGB color profiles, including Display P3, to sRGB before preparing the six-color panel image. Generated previews contain the processed image and its color marker. Original uploads stay in private app storage. Dashboard YAML accepts up to 64 KiB of configuration.
 
-## Request Integration
+## Request an integration
 
 Open **Integrations** and enter the integration’s name in the request form. inkDaddy keeps the request locally until an owner relay is configured. With a relay configured, it sends the name and an identifier derived from the name. After you submit a request, the form shows its status and offers a retry if delivery fails. Network intermediaries can observe ordinary connection metadata.
 

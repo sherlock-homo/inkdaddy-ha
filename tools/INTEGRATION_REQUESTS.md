@@ -2,7 +2,7 @@
 
 The inkDaddy Integrations page saves requests on the app installation. Each request contains the integration name and a deterministic identifier derived from that name. The relay accepts those two fields. Network operators and proxies can still observe connection metadata such as source IP and timing. Configure proxy access logs accordingly. The relay omits sender addresses and request content from its own logs.
 
-A delivery status of **Accepted by owner relay** means the relay acknowledged the exact integration identifier. An accepting relay returns HTTP 201 for a new request or HTTP 200 for a duplicate, with a JSON body containing `status: accepted` and the matching `integration_id`. Review and development are separate owner actions.
+The form reports a request as sent once the relay acknowledges its integration identifier. An accepting relay returns HTTP 201 for a new request or HTTP 200 for a duplicate, with a JSON body containing `status: accepted` and the matching `integration_id`. Review and development are separate owner actions.
 
 ## Run the inbox on the owner’s Mac
 
