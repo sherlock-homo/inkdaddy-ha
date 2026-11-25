@@ -191,3 +191,17 @@ def link(payload: dict[str, object], db: Session = Depends(get_db)) -> dict[str,
     if match is None:
         raise HTTPException(status_code=404, detail="The Matter controller has not paired this display.")
     return _bind(db, match)
+
+
+@router.post("/home-assistant/{device_uid}/playback-buttons")
+def setup_ha_playback_buttons(device_uid: str, db: Session = Depends(get_db)) -> dict[str, int]:
+    from ..services.ha_matter_share import HAMatterShareError
+    from ..services.ha_playback_buttons import install_ha_playback_buttons
+
+    bound = db.scalar(select(MatterFrameBinding.device_id).join(Device).where(Device.device_uid == device_uid))
+    if not bound or not _DISPLAY_UID.fullmatch(device_uid):
+        raise HTTPException(status_code=404, detail="Select a linked Matter display.")
+    try:
+        return install_ha_playback_buttons(device_uid)
+    except HAMatterShareError as exc:
+        raise HTTPException(status_code=exc.status, detail=str(exc)) from exc

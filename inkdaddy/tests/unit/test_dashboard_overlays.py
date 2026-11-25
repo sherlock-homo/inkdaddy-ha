@@ -1,23 +1,23 @@
 import json
 from collections import OrderedDict
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from io import BytesIO
 from types import SimpleNamespace
 from urllib.error import HTTPError
 from urllib.parse import parse_qs, urlsplit
 
 import pytest
-from fastapi import FastAPI
+from fastapi import FastAPI, HTTPException
 from fastapi.testclient import TestClient
 from PIL import Image
-from sqlalchemy import create_engine
+from sqlalchemy import create_engine, select
 from sqlalchemy.orm import Session, sessionmaker
 
 from inkdaddy_hub.api import dashboards, home_assistant
 from inkdaddy_hub.database import Base, get_db
 from inkdaddy_hub.models import Dashboard, Device, Photo, Setting
 from inkdaddy_hub.services import dashboard_calendar as calendar
-from inkdaddy_hub.services.dashboard_content import SITE_SETTING, resolve_photo_overlay, resolve_widget_text
+from inkdaddy_hub.services.dashboard_content import SITE_SETTING, dashboard_config, resolve_photo_overlay, resolve_widget_text
 
 NOW = datetime(2026, 11, 22, 18, tzinfo=timezone.utc)
 
@@ -252,3 +252,91 @@ def test_skips_original_without_a_photo_widget(catalog, monkeypatch):
     monkeypatch.setattr(dashboard_content, "capture_details", unexpected)
     with catalog() as db:
         assert resolve_photo_overlay(db, "cards", NOW, None, photo=db.get(Photo, 1)).widgets[0].label == "Date"
+
+
+def test_existing_clock_tiles_disappear_from_editor_and_saved_layout(catalog):
+    clock = {**DATE, "id": "old-clock", "source": {"type": "clock"}}
+    mixed = {"name": "Mixed", "widgets": [clock, {**DATE, "x": 1}], "custom": {"version": 7}}
+    original = json.dumps(mixed)
+    with catalog.begin() as db:
+        db.add(Dashboard(slug="mixed", name="Mixed", current_yaml=original))
+        db.add(Dashboard(slug="only-clock", name="Only clock",
+                         current_yaml=json.dumps({"name": "Only clock", "widgets": [clock]})))
+    with catalog() as db:
+        saved = dashboards.get_dashboard("mixed", db)
+        raw = json.loads(saved["yaml"])
+        assert raw == {**mixed, "widgets": [{**DATE, "x": 1}]}
+        assert saved["config"]["widgets"] == [{**DATE, "x": 1}]
+        assert db.scalar(select(Dashboard.current_yaml).where(Dashboard.slug == "mixed")) == original
+        empty = dashboards.get_dashboard("only-clock", db)
+        assert empty["config"]["widgets"] == [] and json.loads(empty["yaml"])["widgets"] == []
+        assert dashboards.update_dashboard("only-clock", {"yaml": empty["yaml"]}, db)["config"]["widgets"] == []
+        assert dashboards.get_dashboard("only-clock", db)["config"]["widgets"] == []
+        archived = db.scalar(select(Dashboard).where(Dashboard.slug == "only-clock"))
+        assert dashboard_config(archived, historical=True)["widgets"][0]["source"]["type"] == "clock"
+        assert dashboards.delete_dashboard("only-clock", db) == {"deleted": True}
+        for operation in (lambda: dashboards.create_dashboard({"yaml": original}, db),
+                          lambda: dashboards.update_dashboard("mixed", {"yaml": original}, db)):
+            with pytest.raises(HTTPException) as invalid:
+                operation()
+            assert invalid.value.status_code == 422
+
+
+def test_selected_zone_and_battery_use_the_same_safe_cache_as_pickers(catalog):
+    from inkdaddy_hub.models import HAEntityCache
+    from inkdaddy_hub.services.home_assistant import normalize_state_response, replace_entity_cache
+
+    now = datetime.now(timezone.utc)
+    def row(entity_id, state, **attrs):
+        return {"entity_id": entity_id, "state": state, "attributes": attrs, "last_reported": now.isoformat()}
+
+    with catalog() as db:
+        replace_entity_cache(db, normalize_state_response([
+            row("zone.studio", "7", friendly_name="Studio", latitude=42, longitude=42, persons=["sensitive"]),
+            row("sensor.remote", "0", device_class="battery", unit_of_measurement="%"),
+            row("sensor.volts", "4.1", device_class="voltage", unit_of_measurement="V"),
+            row("sensor.wrong", "400", device_class="battery", unit_of_measurement="%"),
+            row("sensor.unknown", "unknown", device_class="battery", unit_of_measurement="%"),
+        ]))
+        db.commit()
+        zones = home_assistant.entities(purpose="location", limit=40, db=db)["entities"]
+        assert [(z["name"], z["state"], z["attributes"], z["source_reported_at"]) for z in zones] == [
+            ("Studio", None, {}, None)
+        ]
+        assert [b["entity_id"] for b in home_assistant.entities(purpose="battery", limit=10, db=db)["entities"]] == [
+            "sensor.remote", "sensor.unknown", "sensor.wrong"
+        ]
+        zone = db.get(HAEntityCache, "zone.studio")
+        assert zone.state is None and zone.attributes_json == "{}" and zone.source_reported_at is None
+        config = {"name": "Selected", "widgets": [
+            {**DATE, "x": 0, "source": {"type": "location", "entity_id": "zone.studio"}},
+            {**DATE, "x": 1, "source": {"type": "device_battery", "entity_id": "sensor.remote"}},
+            {**DATE, "x": 2, "source": {"type": "device_battery", "entity_id": "sensor.volts"}},
+        ]}
+        registered = dashboards.create_dashboard({"yaml": json.dumps(config)}, db)
+        reloaded = dashboards.get_dashboard(registered["id"], db)["config"]
+        assert [w.value for w in resolve_widget_text(db, reloaded, now, None, observed_at=now)] == [
+            "Studio", "0%", "Unavailable"
+        ]
+        late = now + timedelta(hours=2)
+        later = resolve_widget_text(db, reloaded, late, None, observed_at=late)
+        assert [w.value for w in later] == ["Studio", "0%", "Unavailable"]
+        assert later[1].detail.startswith("Reported ") and str(now.year) in later[1].detail
+        db.delete(zone)
+        db.flush()
+        assert resolve_widget_text(db, reloaded, now, None, observed_at=now)[0].value == "Unavailable"
+
+
+def test_resized_photo_overlays_restore_both_new_and_historical_geometry():
+    from inkdaddy_hub.services.dashboard_content import PhotoOverlay, WidgetText
+
+    config = {"widgets": [{**DATE, "x": 0, "y": 0, "w": 1, "h": 2}]}
+    overlay = PhotoOverlay(config, [WidgetText("Fixture", "123")])
+    original = Image.new("RGB", (800, 480), "red")
+    expanded = overlay.render(original)
+    assert expanded.getpixel((100, 350)) != original.getpixel((100, 350))
+    assert PhotoOverlay.from_snapshot(overlay.snapshot).render(original).tobytes() == expanded.tobytes()
+    legacy = [{k: v for k, v in overlay.snapshot[0].items() if k != "h"}]
+    repaired = PhotoOverlay.from_snapshot(legacy).render(original)
+    assert repaired.getpixel((100, 350)) == original.getpixel((100, 350))
+    assert repaired.getpixel((100, 100)) != original.getpixel((100, 100))

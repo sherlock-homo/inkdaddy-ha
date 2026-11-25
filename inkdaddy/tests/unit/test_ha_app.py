@@ -281,10 +281,10 @@ def test_playback_clock_schema_migrates_existing_rows_idempotently(monkeypatch):
     engine = create_engine("sqlite://")
     Base.metadata.create_all(engine)
     with engine.begin() as connection:
-        connection.exec_driver_sql("ALTER TABLE playback RENAME COLUMN anchor_minute TO anchor_hour")
-        connection.exec_driver_sql("ALTER TABLE playback DROP COLUMN manual_request_minute")
-        connection.exec_driver_sql("ALTER TABLE playback_slots RENAME COLUMN scheduled_minute TO hour")
-        connection.exec_driver_sql("ALTER TABLE playback_offers RENAME COLUMN scheduled_minute TO hour")
+        connection.exec_driver_sql("ALTER TABLE playback RENAME COLUMN anchor_second TO anchor_hour")
+        connection.exec_driver_sql("ALTER TABLE playback DROP COLUMN manual_request_second")
+        connection.exec_driver_sql("ALTER TABLE playback_slots RENAME COLUMN scheduled_second TO hour")
+        connection.exec_driver_sql("ALTER TABLE playback_offers RENAME COLUMN scheduled_second TO hour")
         connection.exec_driver_sql("ALTER TABLE playback DROP COLUMN manual_requested_at")
         connection.exec_driver_sql("ALTER TABLE playback_slots DROP COLUMN manual_observed_at")
         connection.exec_driver_sql("ALTER TABLE playback_slots DROP COLUMN retained_offer_id")
@@ -306,10 +306,51 @@ def test_playback_clock_schema_migrates_existing_rows_idempotently(monkeypatch):
     database.init_db()
     with Session(engine) as db:
         state = db.get(Playback, 1)
-        slot = db.get(PlaybackSlot, (1, 420))
-        assert state.paused and (state.anchor_minute, state.anchor_position) == (420, 2)
-        assert state.manual_request_minute is state.manual_requested_at is None
-        assert db.get(PlaybackOffer, state.current_offer_id).scheduled_minute == 420
+        slot = db.get(PlaybackSlot, (1, 25200))
+        assert state.paused and (state.anchor_second, state.anchor_position) == (25200, 2)
+        assert state.manual_request_second is state.manual_requested_at is None
+        assert db.get(PlaybackOffer, state.current_offer_id).scheduled_second == 25200
         assert (slot.frame_id, slot.render_key) == ("old-frame", "old-render")
         assert slot.manual_observed_at is slot.retained_offer_id is None
+    engine.dispose()
+
+
+def test_dev23_minute_clock_preserves_pending_offer_pause_and_manual_times(monkeypatch):
+    from inkdaddy_hub import database
+    from inkdaddy_hub.models import Device, MatterFrameTransfer, Playback, PlaybackOffer, PlaybackSlot
+
+    engine = create_engine("sqlite://")
+    Base.metadata.create_all(engine)
+    # Use dev.23 column names and persisted minute values, including slot keys
+    # that would collide halfway through an in-place multiplication.
+    with Session(engine) as db:
+        db.add(Device(id=1, device_uid="fixture", name="Fixture"))
+        db.add(Playback(device_id=1, playlist_json="[]", anchor_second=60, anchor_position=2,
+                        first_new_interval_second=120, paused=True, manual_request_second=60, current_offer_id=3))
+        for due in (60, 3600):
+            db.add(PlaybackSlot(device_id=1, scheduled_second=due, source_type="photo", source_id="7",
+                                frame_id="image", render_key="render", title="Photo"))
+        db.add(PlaybackOffer(id=3, device_id=1, scheduled_second=60, source_type="photo", source_id="7",
+                             frame_id="image", title="Photo", offered_at=datetime(2026, 11, 1)))
+        db.add(MatterFrameTransfer(device_id=1, transfer_id="transfer", playback_offer_id=3, render_key="render"))
+        db.commit()
+    with engine.begin() as connection:
+        for table, column in (("playback", "anchor"), ("playback", "first_new_interval"),
+                              ("playback", "manual_request"), ("playback_slots", "scheduled"),
+                              ("playback_offers", "scheduled")):
+            connection.exec_driver_sql(f"ALTER TABLE {table} RENAME COLUMN {column}_second TO {column}_minute")
+        connection.exec_driver_sql("ALTER TABLE devices DROP COLUMN interlace_dashboard_id")
+    monkeypatch.setattr(database, "engine", engine)
+    database.init_db()
+    database.init_db()
+    with Session(engine) as db:
+        assert db.get(Device, 1).interlace_dashboard_id is None
+        state = db.get(Playback, 1)
+        assert (state.paused, state.anchor_second, state.anchor_position) == (True, 3600, 2)
+        assert (state.first_new_interval_second, state.manual_request_second) == (7200, 3600)
+        for second in (3600, 216000):
+            assert db.get(PlaybackSlot, (1, second)).frame_id == "image"
+        transfer = db.get(MatterFrameTransfer, 1)
+        assert transfer.playback_offer_id == state.current_offer_id == 3
+        assert db.get(PlaybackOffer, 3).scheduled_second == 3600
     engine.dispose()

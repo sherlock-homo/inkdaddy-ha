@@ -6,9 +6,10 @@ interface Choice extends PlaybackSource {
   title: string;
 }
 
-export function PlaylistEditor({ path, playlist, defaultSource, initialSource, onSave, onDirtyChange, onBusyChange }: {
+export function PlaylistEditor({ path, playlist, alternating, defaultSource, initialSource, onSave, onDirtyChange, onBusyChange }: {
   path: string;
   playlist: PlaybackSource[];
+  alternating: boolean;
   defaultSource: PlaybackSource;
   initialSource: PlaybackSource | null;
   onSave: (state: Playback) => void;
@@ -51,8 +52,10 @@ export function PlaylistEditor({ path, playlist, defaultSource, initialSource, o
     return () => controller.abort();
   }, [loadAttempt]);
 
+  const addable = alternating ? choices.filter((item) => item.type !== "dashboard") : choices;
+
   const add = (key: string) => {
-    const choice = choices.find((item) => sourceKey(item) === key);
+    const choice = addable.find((item) => sourceKey(item) === key);
     if (!choice) return;
     setEntries([...entries, { type: choice.type, id: choice.id }]);
   };
@@ -81,14 +84,16 @@ export function PlaylistEditor({ path, playlist, defaultSource, initialSource, o
 
   return (
     <div className="form-stack playlist-editor">
-      <p className="muted-text">The display cycles through these items each hour. An empty playlist uses its selected source.</p>
+      <p className="muted-text">{alternating
+        ? "Add photos or albums to choose the photo order. A full-screen dashboard appears between photos."
+        : "The display cycles through these items at its refresh interval. An empty playlist uses its selected source."}</p>
       {entries.length > 0 && (
         <ol className="playlist-list">
           {entries.map((entry, index) => {
             const title = choices.find((item) => sourceKey(item) === sourceKey(entry))?.title ?? `${entry.type} ${entry.id}`;
             return (
               <li key={`${sourceKey(entry)}:${index}`}>
-                <strong>{title}</strong>
+                <strong>{title}{alternating && entry.type === "dashboard" && " (playlist mode only)"}</strong>
                 <div className="playlist-item-actions">
                   <button className="icon-button" aria-label={`Move ${title} up`} disabled={index === 0 || busy} onClick={() => move(index, -1)}>↑</button>
                   <button className="icon-button" aria-label={`Move ${title} down`} disabled={index === entries.length - 1 || busy} onClick={() => move(index, 1)}>↓</button>
@@ -101,9 +106,11 @@ export function PlaylistEditor({ path, playlist, defaultSource, initialSource, o
       )}
       <label>
         Add to playlist
-        <select value="" disabled={busy || loading || !choices.length || entries.length >= 100} onChange={(event) => add(event.target.value)}>
-          <option value="">{loading ? "Loading choices…" : "Choose a dashboard, album, or photo"}</option>
-          {choices.map((item) => <option value={sourceKey(item)} key={sourceKey(item)}>{item.title} ({item.type})</option>)}
+        <select value="" disabled={busy || loading || !addable.length || entries.length >= 100} onChange={(event) => add(event.target.value)}>
+          <option value="">{loading ? "Loading choices…" : alternating
+            ? addable.length ? "Choose a photo or album" : "Upload photos in Manage Photos"
+            : "Choose a dashboard, album, or photo"}</option>
+          {addable.map((item) => <option value={sourceKey(item)} key={sourceKey(item)}>{item.title} ({item.type})</option>)}
         </select>
       </label>
       <div className="playlist-item-actions">

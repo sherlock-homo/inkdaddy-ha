@@ -3,9 +3,10 @@ import { EpaperPreview } from "../components/EpaperPreview";
 import { apiFetch, apiJson, apiPath } from "../lib/api";
 import type { DashboardConfig, DashboardRecord, DashboardWidget, DeviceRecord, PhotoRecord } from "../lib/types";
 import {
-  createWidget, dashboardPresets, displayText, fits, presetWidgets, tiles, WidgetGallery, WidgetSettings, WidgetSymbol, widgetAt, widgetKind,
+  createWidget, dashboardPresets, displayText, presetWidgets, tiles, WidgetGallery, WidgetSettings, WidgetSymbol, widgetAt, widgetKind,
   widgetKinds, widgetTitle, type Tile, type WidgetKind
 } from "./DashboardWidgets";
+import { ResizeHandles } from "./DashboardResize";
 import "./dashboards.css";
 
 const emptyConfig: DashboardConfig = { name: "", grid: { cols: 4, rows: 2 }, widgets: [] };
@@ -396,14 +397,18 @@ function DashboardEditor({ dashboard, devices, heading, onSave, onDelete, restor
                 if (item && (item.x !== position.x || item.y !== position.y)) return null;
                 const kind = item ? widgetKind(item) : undefined;
                 const note = kind === "text" ? displayText(item?.options?.text) : "";
-                return <button type="button" className="dd-tile" key={`${position.x}:${position.y}`} data-filled={Boolean(item)} data-kind={kind}
-                  style={{ gridColumn: `${position.x + 1} / span ${item?.w ?? 1}`, gridRow: `${position.y + 1} / span ${item?.h ?? 1}` }}
+                return <div className="dd-tile-cell" key={item ? `widget:${item.id}` : `empty:${position.x}:${position.y}`}
+                  style={{ gridColumn: `${position.x + 1} / span ${item?.w ?? 1}`, gridRow: `${position.y + 1} / span ${item?.h ?? 1}` }}>
+                  <button type="button" className="dd-tile" data-filled={Boolean(item)} data-kind={kind}
                   aria-pressed={position.x === tile.x && position.y === tile.y} disabled={Boolean(busy)}
                   aria-label={`${item ? widgetTitle(item) : "Add widget"}, row ${position.y + 1}, column ${position.x + 1}`}
-                  onClick={() => selectTile(position)}>
+                  onClick={() => item ? setTile(position) : selectTile(position)}>
                   {item ? <><WidgetSymbol kind={kind} /><strong>{widgetTitle(item)}</strong>{note && <small>{note}</small>}</> :
                     <span className="dd-empty-tile" aria-hidden="true">+</span>}
-                </button>;
+                  </button>
+                  {item && item === widget && <ResizeHandles widget={item} widgets={draft.widgets}
+                    disabled={Boolean(busy)} onResize={updateWidget} />}
+                </div>;
               })}
             </div>
           </section>
@@ -414,7 +419,7 @@ function DashboardEditor({ dashboard, devices, heading, onSave, onDelete, restor
                   `Row ${tile.y + 1}, column ${tile.x + 1}`}</p></div>
             </div>
             {widget ? <WidgetSettings key={widget.id} widget={widget} widgets={draft.widgets} disabled={Boolean(busy)} onChange={updateWidget}
-              onRemove={removeWidget} /> : <WidgetGallery disabled={Boolean(busy)} fitsAgenda={fits(draft.widgets, tile, 2, 1)} onAdd={addWidget} />}
+              onRemove={removeWidget} /> : <WidgetGallery disabled={Boolean(busy)} onAdd={addWidget} />}
           </section>
         </div>
         <footer className="dd-editor-footer">

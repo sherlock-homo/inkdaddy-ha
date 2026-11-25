@@ -19,6 +19,7 @@ from ..models import (
     PlaybackOffer,
     PlaybackSlot,
 )
+from ..services.dashboard_content import get_dashboard_record
 from ..services.frame_pipeline import prepare_device_frame, render_device_image
 from ..services.home_assistant import supervisor_connection
 from ..services.matter_delivery import queue_playback_mirror
@@ -35,13 +36,14 @@ from ..services.playback import (
     refresh_playback_slots,
     reset_selection,
     update_playlist,
-    update_refresh_interval,
+    slot_interval_seconds,
+    update_playback_schedule,
 )
 from ..services.rendering import render_preview_png_bytes
 
 router = APIRouter(prefix="/api/devices", tags=["devices"])
 MANAGED_DEVICE_FIELDS = frozenset({
-    "name", "selected_source_type", "selected_source_id", "refresh_interval_minutes",
+    "name", "selected_source_type", "selected_source_id", "refresh_interval_minutes", "interlace_dashboard_id",
 })
 
 
@@ -51,7 +53,7 @@ def require_standalone_device_api() -> None:
 
 
 def _device_payload(device: Device) -> dict[str, object]:
-    warning = device.refresh_interval_minutes < 15
+    warning = slot_interval_seconds(device) < 15 * 60
     return {
         "id": str(device.id),
         "device_uid": device.device_uid,
@@ -62,6 +64,7 @@ def _device_payload(device: Device) -> dict[str, object]:
         "provisioned": device.provisioned,
         "mesh_connected": device.mesh_connected,
         "refresh_interval_minutes": device.refresh_interval_minutes,
+        "interlace_dashboard_id": device.interlace_dashboard_id,
         "refresh_interval_warning": warning,
         "selected_source_type": device.selected_source_type,
         "selected_source_id": device.selected_source_id,
@@ -121,11 +124,14 @@ def _apply_device_payload(db: Session, device: Device, payload: dict[str, object
         if key in payload and payload[key] is not None:
             setattr(device, key, float(payload[key]))
     interval = _interval_from_payload(payload)
-    if interval is not None:
-        if device.id is None:
-            device.refresh_interval_minutes = interval
-        else:
-            update_refresh_interval(db, device, interval)
+    if interval is not None or "interlace_dashboard_id" in payload:
+        dashboard = payload.get("interlace_dashboard_id", device.interlace_dashboard_id)
+        if dashboard is not None and (
+            not isinstance(dashboard, str) or not dashboard or len(dashboard) > 128
+            or (dashboard != "sample" and get_dashboard_record(db, dashboard) is None)
+        ):
+            raise HTTPException(status_code=422, detail="Select an available dashboard for alternating playback.")
+        update_playback_schedule(db, device, interval or device.refresh_interval_minutes or 60, dashboard)
 
 
 def _interval_from_payload(payload: dict[str, object]) -> int | None:
@@ -165,11 +171,11 @@ def update_device(device_id: str, payload: dict[str, object], db: Session = Depe
         if not isinstance(name, str) or not name.strip() or len(name.strip()) > 255:
             raise HTTPException(status_code=422, detail="Enter a display name between 1 and 255 characters.")
         payload = {**payload, "name": name.strip()}
-    previous_interval = device.refresh_interval_minutes
+    previous_schedule = (device.refresh_interval_minutes, device.interlace_dashboard_id)
     _apply_device_payload(db, device, payload)
     if previous_selection != (device.selected_source_type, device.selected_source_id):
         reset_selection(db, device)
-    if device.provisioned and device.refresh_interval_minutes != previous_interval:
+    if device.provisioned and (device.refresh_interval_minutes, device.interlace_dashboard_id) != previous_schedule:
         refresh_playback_slots(db, device)
     db.commit()
     db.refresh(device)
@@ -364,11 +370,12 @@ def device_config(device_id: str, db: Session = Depends(get_db)) -> dict[str, ob
     return {
         "device_uid": device.device_uid,
         "refresh_interval_minutes": device.refresh_interval_minutes,
+        "interlace_dashboard_id": device.interlace_dashboard_id,
         "selected_source_type": device.selected_source_type,
         "selected_source_id": device.selected_source_id,
         "provisioning_timeout_seconds": 300,
         "startup_join_timeout_seconds": 30,
-        "refresh_interval_warning": device.refresh_interval_minutes < 15,
+        "refresh_interval_warning": slot_interval_seconds(device) < 15 * 60,
     }
 
 

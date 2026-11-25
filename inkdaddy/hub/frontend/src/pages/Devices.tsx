@@ -1,23 +1,31 @@
 import { useCallback, useEffect, useState, type FormEvent } from "react";
 import { apiJson } from "../lib/api";
-import type { DeviceHistoryRecord, DeviceRecord } from "../lib/types";
+import type { DashboardRecord, DeviceHistoryRecord, DeviceRecord } from "../lib/types";
 
 export function DevicesPage({ onConnect, onOpenDisplay }: { onConnect: () => void; onOpenDisplay: (uid: string) => void }) {
   const [devices, setDevices] = useState<DeviceRecord[] | null>(null);
+  const [dashboards, setDashboards] = useState<DashboardRecord[] | null>(null);
+  const [dashboardError, setDashboardError] = useState("");
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
 
   const load = useCallback(async (signal?: AbortSignal) => {
     setBusy(true);
     setError("");
-    try {
-      const result = await apiJson<{ devices: DeviceRecord[] }>("/api/devices", { signal });
-      if (!signal?.aborted) setDevices(result.devices);
-    } catch {
-      if (!signal?.aborted) setError("Unable to load displays.");
-    } finally {
-      if (!signal?.aborted) setBusy(false);
+    setDashboardError("");
+    const [registry, layouts] = await Promise.allSettled([
+      apiJson<{ devices: DeviceRecord[] }>("/api/devices", { signal }),
+      apiJson<{ dashboards: DashboardRecord[] }>("/api/dashboards", { signal }),
+    ]);
+    if (signal?.aborted) return;
+    if (registry.status === "fulfilled") setDevices(registry.value.devices);
+    else setError("Unable to load displays.");
+    if (layouts.status === "fulfilled") setDashboards(layouts.value.dashboards);
+    else {
+      setDashboards(null);
+      setDashboardError("Unable to load dashboards. Refresh the device list to try again.");
     }
+    setBusy(false);
   }, []);
   useEffect(() => {
     const controller = new AbortController();
@@ -33,17 +41,20 @@ export function DevicesPage({ onConnect, onOpenDisplay }: { onConnect: () => voi
     </div>
     {devices && !devices.length && <section className="empty-state compact"><h2>No displays registered</h2></section>}
     <section className="card-grid">
-      {devices?.map((device) => <DeviceCard key={device.device_uid} device={device} refreshing={busy} onOpenDisplay={onOpenDisplay}
-        onRename={(updated) => setDevices((rows) => rows?.map((row) => row.device_uid === updated.device_uid ? updated : row) ?? null)} />)}
+      {devices?.map((device) => <DeviceCard key={device.device_uid} device={device} dashboards={dashboards} dashboardError={dashboardError}
+        refreshing={busy} onOpenDisplay={onOpenDisplay}
+        onUpdate={(updated) => setDevices((rows) => rows?.map((row) => row.device_uid === updated.device_uid ? updated : row) ?? null)} />)}
     </section>
   </div>;
 }
 
-function DeviceCard({ device, refreshing, onOpenDisplay, onRename }: {
+function DeviceCard({ device, dashboards, dashboardError, refreshing, onOpenDisplay, onUpdate }: {
   device: DeviceRecord;
+  dashboards: DashboardRecord[] | null;
+  dashboardError: string;
   refreshing: boolean;
   onOpenDisplay: (uid: string) => void;
-  onRename: (device: DeviceRecord) => void;
+  onUpdate: (device: DeviceRecord) => void;
 }) {
   const [name, setName] = useState<string | null>(null);
   const [saving, setSaving] = useState(false);
@@ -53,39 +64,54 @@ function DeviceCard({ device, refreshing, onOpenDisplay, onRename }: {
   const [renameMessage, setRenameMessage] = useState("");
   const [renameError, setRenameError] = useState("");
   const [interval, setInterval] = useState<string | null>(null);
-  const [savingInterval, setSavingInterval] = useState(false);
-  const [intervalMessage, setIntervalMessage] = useState("");
-  const [intervalError, setIntervalError] = useState("");
+  const [draftDashboard, setDraftDashboard] = useState<string | null>();
+  const [savingSchedule, setSavingSchedule] = useState(false);
+  const [scheduleMessage, setScheduleMessage] = useState("");
+  const [scheduleError, setScheduleError] = useState("");
   const route = `/api/devices/${encodeURIComponent(device.device_uid)}`;
   const minutes = Number(interval ?? device.refresh_interval_minutes);
 
-  async function saveInterval(event: FormEvent) {
+  const savedDashboard = device.interlace_dashboard_id ?? null;
+  const dashboard = draftDashboard === undefined ? savedDashboard : draftDashboard;
+  const intervalValid = Number.isInteger(minutes) && minutes >= 10 && minutes <= 3600;
+  const canSave = intervalValid && (minutes !== device.refresh_interval_minutes || dashboard !== savedDashboard)
+    && (dashboard === null || dashboard === savedDashboard || dashboards?.some((item) => item.id === dashboard));
+
+  function clearScheduleFeedback() {
+    setScheduleMessage("");
+    setScheduleError("");
+  }
+
+  async function saveSchedule(event: FormEvent) {
     event.preventDefault();
-    if (!Number.isInteger(minutes) || minutes < 10 || minutes > 3600 || refreshing || savingInterval || saving) return;
-    setSavingInterval(true);
-    setIntervalMessage("");
-    setIntervalError("");
+    if (!canSave || refreshing || savingSchedule || saving) return;
+    setSavingSchedule(true);
+    clearScheduleFeedback();
     try {
-      onRename(await apiJson<DeviceRecord>(route, {
-        method: "PUT", body: JSON.stringify({ refresh_interval_minutes: minutes }),
+      onUpdate(await apiJson<DeviceRecord>(route, {
+        method: "PUT", body: JSON.stringify({
+          refresh_interval_minutes: minutes !== device.refresh_interval_minutes ? minutes : undefined,
+          interlace_dashboard_id: dashboard !== savedDashboard ? dashboard : undefined,
+        }),
       }));
       setInterval(null);
-      setIntervalMessage("Refresh interval saved.");
+      setDraftDashboard(undefined);
+      setScheduleMessage("Playback schedule saved.");
     } catch {
-      setIntervalError("Unable to save the refresh interval.");
+      setScheduleError("Unable to save the playback schedule. Refresh the device list and try again.");
     } finally {
-      setSavingInterval(false);
+      setSavingSchedule(false);
     }
   }
 
   async function rename(event: FormEvent) {
     event.preventDefault();
-    if (!name?.trim() || refreshing || saving || savingInterval) return;
+    if (!name?.trim() || refreshing || saving || savingSchedule) return;
     setSaving(true);
     setRenameError("");
     setRenameMessage("");
     try {
-      onRename(await apiJson<DeviceRecord>(route, { method: "PUT", body: JSON.stringify({ name }) }));
+      onUpdate(await apiJson<DeviceRecord>(route, { method: "PUT", body: JSON.stringify({ name }) }));
       setName(null);
       setRenameMessage("Display renamed.");
     } catch {
@@ -130,21 +156,42 @@ function DeviceCard({ device, refreshing, onOpenDisplay, onRename }: {
     </form>}
     {renameMessage && <p role="status">{renameMessage}</p>}
     {renameError && <p className="warning-text" role="alert">{renameError}</p>}
-    <form className="form-stack" onSubmit={(event) => void saveInterval(event)}>
-      <label>Refresh interval (minutes)
-        <input type="number" required min={10} max={3600} step={1} disabled={savingInterval}
-          value={interval ?? device.refresh_interval_minutes}
-          onChange={(event) => { setInterval(event.target.value); setIntervalMessage(""); }} />
+    <form className="form-stack" onSubmit={(event) => void saveSchedule(event)}>
+      <label>Playback mode
+        <select value={dashboard ? "alternate" : "playlist"} disabled={savingSchedule}
+          onChange={(event) => { setDraftDashboard(event.target.value === "alternate" ? savedDashboard || "sample" : null); clearScheduleFeedback(); }}>
+          <option value="playlist">Playlist</option>
+          <option value="alternate">Alternate photos and dashboard</option>
+        </select>
       </label>
-      {minutes >= 10 && minutes < 15 && <p className="warning-text">Frequent updates use more battery.</p>}
+      {dashboard && <>
+        <label>Full-screen dashboard
+          <select value={dashboard} disabled={savingSchedule || !dashboards}
+            onChange={(event) => { setDraftDashboard(event.target.value); clearScheduleFeedback(); }}>
+            {!dashboards?.some((item) => item.id === dashboard) &&
+              <option value={dashboard}>{dashboardError ? dashboard : "Loading dashboard…"}</option>}
+            {dashboards?.map((item) => <option value={item.id} key={item.id}>{item.name}</option>)}
+          </select>
+        </label>
+        {dashboardError && <p className="warning-text" role="alert">{dashboardError}</p>}
+      </>}
+      <label>{dashboard ? "Cycle length (minutes)" : "Refresh interval (minutes)"}
+        <input type="number" required min={10} max={3600} step={1} disabled={savingSchedule}
+          value={interval ?? device.refresh_interval_minutes}
+          onChange={(event) => { setInterval(event.target.value); clearScheduleFeedback(); }} />
+      </label>
+      {dashboard && intervalValid && <p className="muted-text">
+        Each photo and dashboard stays on screen for {minutes / 2} minutes.
+      </p>}
+      {intervalValid && (dashboard ? minutes / 2 : minutes) < 15 && <p className="warning-text">Frequent updates use more battery.</p>}
       <div className="button-row">
-        <button className="secondary-button" disabled={savingInterval || saving || refreshing || !Number.isInteger(minutes) || minutes < 10 || minutes > 3600 || minutes === device.refresh_interval_minutes}>
-          {savingInterval ? "Saving interval…" : "Save interval"}
+        <button className="secondary-button" disabled={savingSchedule || saving || refreshing || !canSave}>
+          {savingSchedule ? "Saving schedule…" : "Save schedule"}
         </button>
       </div>
     </form>
-    {intervalMessage && <p role="status">{intervalMessage}</p>}
-    {intervalError && <p role="alert">{intervalError}</p>}
+    {scheduleMessage && <p role="status">{scheduleMessage}</p>}
+    {scheduleError && <p role="alert">{scheduleError}</p>}
     <details onToggle={(event) => {
       if (event.currentTarget.open && history === null && !loadingHistory && !historyError) void loadHistory();
     }}>

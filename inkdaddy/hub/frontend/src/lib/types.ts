@@ -49,6 +49,7 @@ export interface DeviceRecord {
   provisioned: boolean;
   mesh_connected: boolean;
   refresh_interval_minutes: number;
+  interlace_dashboard_id: string | null;
   refresh_interval_warning: boolean;
   selected_source_type: string;
   selected_source_id: string | null;

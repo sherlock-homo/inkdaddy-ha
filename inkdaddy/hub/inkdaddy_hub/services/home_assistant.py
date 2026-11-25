@@ -218,12 +218,12 @@ def replace_entity_cache(db: Session, states: list[HAEntity]) -> None:
             entity_id=entity.entity_id,
             domain=entity.domain,
             name=entity.name,
-            state=cache_entity_state(entity.domain, entity.state),
-            source_reported_at=entity.reported_at,
-            attributes_json=json.dumps(cache_entity_attributes(entity.attributes), sort_keys=True),
+            state=None if entity.domain == "zone" else cache_entity_state(entity.domain, entity.state),
+            source_reported_at=None if entity.domain == "zone" else entity.reported_at,
+            attributes_json="{}" if entity.domain == "zone" else json.dumps(cache_entity_attributes(entity.attributes), sort_keys=True),
         )
         for entity in states
-        if entity.domain in ENTITY_CACHE_DOMAINS or entity.entity_id == "zone.home"
+        if entity.domain in ENTITY_CACHE_DOMAINS or entity.domain == "zone"
     )
 
 

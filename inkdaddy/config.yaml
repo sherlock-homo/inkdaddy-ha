@@ -1,6 +1,6 @@
 name: inkDaddy
 description: Manage and schedule photos and dashboards for inkDaddy ePaper displays
-version: "0.2.0-dev.23"
+version: "0.2.0-dev.24"
 slug: inkdaddy
 arch:
   - aarch64

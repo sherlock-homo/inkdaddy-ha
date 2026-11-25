@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import re
 from dataclasses import dataclass
 from typing import Any
 
@@ -16,17 +17,19 @@ MAX_YAML_EVENTS = 4096
 MAX_YAML_DEPTH = 32
 PHOTO_METADATA_FIELDS = ("date_taken", "years_ago", "location")
 
+EDITOR_SPANS = {(w, h) for w in range(1, GRID_COLS + 1) for h in range(1, GRID_ROWS + 1)}
+
 WIDGET_FOOTPRINTS: dict[str, set[tuple[int, int]]] = {
-    "big_number": {(1, 1), (2, 1)},
+    "big_number": EDITOR_SPANS,
     "on_off_state": {(1, 1)},
     "status_pill": {(1, 1)},
-    "entity_state": {(1, 1), (2, 1)},
+    "entity_state": EDITOR_SPANS,
     "line_chart": {(2, 1), (2, 2), (4, 1)},
     "bar_chart": {(2, 1), (2, 2), (4, 1)},
     "donut_chart": {(1, 1), (2, 2)},
-    "agenda": {(2, 1), (2, 2), (4, 1), (4, 2)},
-    "weather_summary": {(2, 1), (2, 2), (4, 1)},
-    "text_note": {(1, 1), (2, 1), (2, 2), (4, 1), (4, 2)},
+    "agenda": EDITOR_SPANS,
+    "weather_summary": EDITOR_SPANS,
+    "text_note": EDITOR_SPANS,
     "photo_tile": {(1, 1), (2, 1), (2, 2), (4, 2)},
     "vertical_status_stack": {(1, 2)},
     "full_dashboard": {(4, 2)},
@@ -91,7 +94,7 @@ def load_dashboard_yaml(raw_yaml: str) -> dict[str, Any]:
     return loaded
 
 
-def validate_dashboard_config(config: dict[str, Any]) -> dict[str, Any]:
+def validate_dashboard_config(config: dict[str, Any], *, historical: bool = False) -> dict[str, Any]:
     if not isinstance(config, dict):
         raise DashboardValidationError("Dashboard config must be a mapping.")
 
@@ -112,7 +115,7 @@ def validate_dashboard_config(config: dict[str, Any]) -> dict[str, Any]:
     for index, widget in enumerate(widgets):
         if not isinstance(widget, dict):
             raise DashboardValidationError(f"Widget at index {index} must be a mapping.")
-        normalized = validate_widget(widget, index=index, cols=cols, rows=rows)
+        normalized = validate_widget(widget, index=index, cols=cols, rows=rows, historical=historical)
         for tile in iter_widget_tiles(normalized):
             previous = occupied.get((tile.x, tile.y))
             if previous is not None:
@@ -130,7 +133,7 @@ def validate_dashboard_config(config: dict[str, Any]) -> dict[str, Any]:
     return normalized_config
 
 
-def validate_widget(widget: dict[str, Any], *, index: int, cols: int, rows: int) -> dict[str, Any]:
+def validate_widget(widget: dict[str, Any], *, index: int, cols: int, rows: int, historical: bool = False) -> dict[str, Any]:
     widget_id = str(widget.get("id") or f"widget_{index + 1}")
     widget_type = str(widget.get("type") or "")
     if widget_type not in WIDGET_FOOTPRINTS:
@@ -157,6 +160,13 @@ def validate_widget(widget: dict[str, Any], *, index: int, cols: int, rows: int)
         if not isinstance(normalized[field], dict):
             raise DashboardValidationError(f"Widget {widget_id} {field} must be a mapping.")
     source = normalized["source"]
+    if source.get("type") == "clock" and not historical:
+        raise DashboardValidationError("Clock widgets are no longer available.")
+    if source.get("type") in ("location", "device_battery") and "entity_id" in source and not historical:
+        domain = "zone" if source["type"] == "location" else "sensor"
+        entity = source["entity_id"]
+        if not isinstance(entity, str) or len(entity) > 255 or not re.fullmatch(domain + r"\.[a-z0-9_]+", entity):
+            raise DashboardValidationError(f"Choose a {domain} entity or use the default source.")
     if source.get("type") == "photo_metadata" and source.get("field") not in PHOTO_METADATA_FIELDS:
         raise DashboardValidationError("Choose a photo date, age, or location for the Photo details widget.")
     return normalized
@@ -209,16 +219,6 @@ grid:
   cols: 4
   rows: 2
 widgets:
-  - id: clock
-    type: big_number
-    x: 0
-    y: 0
-    w: 2
-    h: 1
-    source:
-      type: clock
-    options:
-      label: Local time
   - id: weather
     type: weather_summary
     x: 2
@@ -250,3 +250,17 @@ widgets:
     source:
       type: device_battery
 """
+
+
+# Exact legacy sample layout for repair of a previously offered bitmap.
+HISTORICAL_SAMPLE_DASHBOARD = SAMPLE_DASHBOARD.replace("  - id: weather", """  - id: clock
+    type: big_number
+    x: 0
+    y: 0
+    w: 2
+    h: 1
+    source:
+      type: clock
+    options:
+      label: Local time
+  - id: weather""", 1)

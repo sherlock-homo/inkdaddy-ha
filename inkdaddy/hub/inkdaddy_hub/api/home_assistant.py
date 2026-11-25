@@ -13,7 +13,7 @@ from sqlalchemy.orm import Session
 from ..database import get_db
 from ..models import HAEntityCache, HomeAssistantConfig
 from ..services.dashboard_calendar import fetch_calendar_choices
-from ..services.dashboard_sensors import DASHBOARD_DOMAINS, dashboard_eligible, entity_attributes
+from ..services.dashboard_sensors import DASHBOARD_DOMAINS, battery_source, dashboard_eligible, entity_attributes
 from ..services.home_assistant import (
     HA_CONFIG_ID,
     ENTITY_CACHE_DOMAINS,
@@ -102,6 +102,10 @@ def _config_payload(db: Session, config: HomeAssistantConfig | None) -> dict[str
 
 
 def _entity_payload(entity: HAEntityCache) -> dict[str, object]:
+    if entity.domain == "zone":
+        # Pre-upgrade zone.home rows may still have old report metadata.
+        return {"entity_id": entity.entity_id, "domain": "zone", "name": entity.name,
+                "state": None, "attributes": {}, "device_id": None, "source_reported_at": None, "updated_at": None}
     return {
         "entity_id": entity.entity_id,
         "domain": entity.domain,
@@ -222,9 +226,10 @@ def entities(
     domain: str | None = None,
     limit: int = Query(250, ge=1, le=1000),
     db: Session = Depends(get_db),
-    purpose: Literal["dashboard"] | None = None,
+    purpose: Literal["dashboard", "location", "battery"] | None = None,
 ) -> dict[str, object]:
-    query = select(HAEntityCache).where(HAEntityCache.domain.in_(ENTITY_CACHE_DOMAINS))
+    domains = {"dashboard": DASHBOARD_DOMAINS, "battery": ("sensor",), "location": ("zone",)}
+    query = select(HAEntityCache).where(HAEntityCache.domain.in_(domains.get(purpose, ENTITY_CACHE_DOMAINS)))
     if domain:
         query = query.where(HAEntityCache.domain == domain)
     if search:
@@ -233,10 +238,14 @@ def entities(
             func.lower(HAEntityCache.entity_id).like(like) | func.lower(HAEntityCache.name).like(like)
         )
     query = query.order_by(HAEntityCache.domain, HAEntityCache.entity_id)
-    if purpose == "dashboard":
-        query = query.where(HAEntityCache.domain.in_(DASHBOARD_DOMAINS)).execution_options(yield_per=100)
+    if purpose in ("dashboard", "battery"):
+        query = query.execution_options(yield_per=100)
         now = datetime.now(timezone.utc)
-        rows = islice((entity for entity in db.scalars(query) if dashboard_eligible(entity, now)), limit)
+        candidates = db.scalars(query)
+        choices = filter(battery_source, candidates) if purpose == "battery" else (
+            entity for entity in candidates if dashboard_eligible(entity, now)
+        )
+        rows = islice(choices, limit)
     else:
         rows = db.scalars(query.limit(limit))
     return {

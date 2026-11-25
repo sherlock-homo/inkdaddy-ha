@@ -157,6 +157,9 @@ export function Home({ onConnect, preferredUid, onDisplaySelected, playlistSourc
   const pending = playback?.pending;
   const pendingFailed = playback?.pending_status === "failed";
   const upcoming = playback?.upcoming ?? [];
+  let scheduleLabel = `Refreshes every ${display?.refresh_interval_minutes ?? 60} minutes`;
+  if (display?.interlace_dashboard_id) scheduleLabel = `Photo and dashboard alternate every ${display.refresh_interval_minutes / 2} minutes`;
+  if (playback?.paused) scheduleLabel = "Slideshow paused";
   const controlsDisabled = busy || editingQueue || !playback || Boolean(playbackError);
 
   return (
@@ -241,7 +244,7 @@ export function Home({ onConnect, preferredUid, onDisplaySelected, playlistSourc
               <div className="preview-toolbar upcoming-header">
                 <div>
                   <h2 id="upcoming-title">Up next</h2>
-                  <p>{playback?.paused ? "Slideshow paused" : `Refreshes every ${display?.refresh_interval_minutes ?? 60} minutes`}</p>
+                  <p>{scheduleLabel}</p>
                 </div>
                 <button className="secondary-button" disabled={busy || savingPlaylist || !playback} onClick={togglePlaylist}>
                   {editingQueue ? "Close editor" : "Edit playlist"}
@@ -252,6 +255,7 @@ export function Home({ onConnect, preferredUid, onDisplaySelected, playlistSourc
                   key={playbackPath}
                   path={playbackPath}
                   playlist={playback.playlist}
+                  alternating={Boolean(display.interlace_dashboard_id)}
                   defaultSource={display.selected_source_id && ["dashboard", "album", "photo"].includes(display.selected_source_type)
                     ? { type: display.selected_source_type as PlaybackSource["type"], id: display.selected_source_id }
                     : { type: "dashboard", id: "sample" }}
@@ -292,5 +296,7 @@ function UpcomingFrame({ frame }: { frame: FrameSlot }) {
 
 function formatDate(value: string): string {
   const timestamp = /(?:Z|[+-]\d{2}:\d{2})$/i.test(value) ? value : `${value}Z`;
-  return new Date(timestamp).toLocaleString(undefined, { weekday: "short", hour: "numeric", minute: "2-digit" });
+  const moment = new Date(timestamp);
+  return moment.toLocaleString(undefined, { weekday: "short", hour: "numeric", minute: "2-digit",
+    second: moment.getSeconds() ? "2-digit" : undefined });
 }

@@ -1,5 +1,15 @@
 # inkDaddy Home Assistant repository checklist
 
+## Alternating photos and dashboards and Home Assistant controls
+
+- [x] Add a per-display mode that alternates a playlist photo and a full dashboard, each for half of the configured cycle. Preserve existing playlists, overlays, and receipts.
+- [x] Add display settings for the mode and dashboard and verify the half-cycle times and photo order.
+- [x] Show playback commands as Home Assistant buttons, preserve the working Matter pairing, and explain the endpoint Identify buttons.
+- [x] Resize dashboard widgets by dragging a side on a phone or desktop. Keep keyboard size controls, preserve neighboring tiles, and verify save/reopen.
+- [x] Remove clocks from active layouts and the picker. Add configurable Home Assistant source selection for relevant existing and new widgets.
+- [ ] Check panel partial refresh support. Verify the signed firmware image, deliver it to the paired frame over Thread, and confirm its version and a frame receipt.
+- [ ] Test migration, scheduling, manual commands, and the installed app. Publish the release and verify it in Home Assistant.
+
 ## Photo metadata overlays
 
 - [x] Read supported capture dates and locations from saved originals, including older uploads. Keep metadata local and handle missing, malformed, and oversized data.

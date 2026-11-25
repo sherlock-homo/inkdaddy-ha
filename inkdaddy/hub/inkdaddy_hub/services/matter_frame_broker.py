@@ -22,7 +22,7 @@ from .palette import WAVESHARE_7COLOR_6
 from .playback import (
     SUCCESS_RESULTS,
     begin_playback_write,
-    epoch_minute,
+    epoch_second,
     read_frame_bytes,
     refresh_playback_slots,
     repair_playback_frame,
@@ -97,20 +97,20 @@ def prepare_matter_frame(
         and previous.source_type == slot.source_type and previous.source_id == slot.source_id
     )
     if (
-        same_artwork and previous.scheduled_minute < slot.scheduled_minute
+        same_artwork and previous.scheduled_second < slot.scheduled_second
         and active.acknowledged_at is not None and previous.id == playback.current_offer_id
-        and device.last_frame_id == slot.frame_id and playback.manual_request_minute != slot.scheduled_minute
+        and device.last_frame_id == slot.frame_id and playback.manual_request_second != slot.scheduled_second
     ):
         # Keep the authenticated receipt and its timestamp. No panel refresh occurred.
         slot.retained_offer_id = previous.id
     elif (
-        not same_artwork or previous.scheduled_minute != slot.scheduled_minute
+        not same_artwork or previous.scheduled_second != slot.scheduled_second
         or active.render_key != slot.render_key
     ):
         slot.retained_offer_id = None
         previous = PlaybackOffer(
             device_id=device.id,
-            scheduled_minute=slot.scheduled_minute,
+            scheduled_second=slot.scheduled_second,
             source_type=slot.source_type,
             source_id=slot.source_id,
             title=slot.title,
@@ -141,14 +141,14 @@ def prepare_matter_frame(
         acknowledged=active.acknowledged_at is not None,
         source_type=slot.source_type,
         source_id=slot.source_id,
-        scheduled_at=scheduled_time(previous.scheduled_minute),
+        scheduled_at=scheduled_time(previous.scheduled_second),
     )
 
 
 def load_matter_frame_payload(db: Session, device: Device, offer: MatterFrameOffer) -> bytes:
     """Read the exact offered asset in the same write transaction that prepared it."""
-    scheduled_minute = epoch_minute(offer.scheduled_at)
-    slot = db.get(PlaybackSlot, (device.id, scheduled_minute))
+    scheduled_second = epoch_second(offer.scheduled_at)
+    slot = db.get(PlaybackSlot, (device.id, scheduled_second))
     if slot is None and offer.acknowledged:
         # The queue can prune the original slot while the display keeps its confirmed image.
         slot = db.scalar(
@@ -156,7 +156,7 @@ def load_matter_frame_payload(db: Session, device: Device, offer: MatterFrameOff
             .join(MatterFrameTransfer, MatterFrameTransfer.playback_offer_id == PlaybackSlot.retained_offer_id)
             .where(PlaybackSlot.device_id == device.id, MatterFrameTransfer.device_id == device.id,
                    MatterFrameTransfer.transfer_id == offer.transfer_id)
-            .order_by(PlaybackSlot.scheduled_minute.desc()).limit(1)
+            .order_by(PlaybackSlot.scheduled_second.desc()).limit(1)
         )
     frame = db.scalar(select(Frame).where(Frame.frame_id == offer.frame_id))
     if slot is None or slot.frame_id != offer.frame_id or frame is None or frame.sha256 != offer.sha256:

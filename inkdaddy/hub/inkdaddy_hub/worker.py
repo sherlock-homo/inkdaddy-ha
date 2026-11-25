@@ -59,6 +59,7 @@ def refresh_dashboard_calendars() -> None:
             device.selected_source_id or "sample" for device in devices if device.selected_source_type == "dashboard"
         }
         selected.update(device.overlay_dashboard_id for device in devices if device.overlay_dashboard_id)
+        selected.update(device.interlace_dashboard_id for device in devices if device.interlace_dashboard_id)
         for playlist in db.scalars(select(Playback.playlist_json).where(
             Playback.device_id.in_(device.id for device in devices)
         )):

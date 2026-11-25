@@ -255,8 +255,8 @@ def test_first_frame_for_new_link_uses_local_home_overview(peer, packing, app_ca
             widgets = resolve_widget_text(
                 db, config, NOW.replace(minute=0), db.get(Device, device_id), observed_at=clock.now
             )
-            assert [widget.value for widget in widgets[:3]] == ["11:00", "Partly cloudy", "Test House"]
-            assert widgets[1].detail == "16 °C"
+            assert [widget.value for widget in widgets[:2]] == ["Partly cloudy", "Test House"]
+            assert widgets[0].detail == "16 °C"
             expected, _digest = raw_frame_from_image(render_dashboard(config, widgets), dither=True)
         expect_download(software, attempt.transfer_id, expected, packing=packing)
         software.call("display", transfer_id=attempt.transfer_id)
@@ -342,7 +342,7 @@ widgets:
                 "yaml": """
 name: Hourly
 widgets:
-  - {id: time, type: big_number, x: 0, y: 0, w: 2, h: 1, source: {type: clock}}
+  - {id: date, type: entity_state, x: 0, y: 0, w: 2, h: 1, source: {type: date}}
   - {id: room, type: big_number, x: 2, y: 0, w: 2, h: 1, source: {type: home_assistant, entity_id: sensor.room}}
 """,
             },
@@ -482,7 +482,7 @@ widgets:
         widgets = resolve_widget_text(
             db, config, clock.now, db.get(Device, device_id), observed_at=clock.now
         )
-        assert [widget.value for widget in widgets] == ["16:50", "24 °C"]
+        assert [widget.value for widget in widgets] == ["Wed, Nov 18", "24 °C"]
         expected_hourly, _digest = raw_frame_from_image(
             render_dashboard(config, widgets), dither=True
         )
@@ -534,6 +534,8 @@ widgets:
     assert software.call("counts") == {"acceptance_count": 3, "receipt_reads": 0}
 
     clock.now += timedelta(minutes=8)
+    with sessions.begin() as db:
+        db.get(HAEntityCache, "sensor.room").state = "25"
     response_json(client.post(f"{route}/manual-refresh", params={"action": "refresh_current"}))
     rejected = matter_delivery.deliver_frame(controller, device_id, target, None, now=2_815)
     assert rejected is not None and rejected.transfer_id != third.transfer_id
@@ -542,8 +544,7 @@ widgets:
         widgets = resolve_widget_text(
             db, config, clock.now, db.get(Device, device_id), observed_at=clock.now, time_kind="manual",
         )
-        assert [widget.value for widget in widgets] == ["16:58", "24 °C"]
-        assert widgets[0].detail.startswith("Requested ")
+        assert [widget.value for widget in widgets] == ["Wed, Nov 18", "25 °C"]
         expected_manual, _digest = raw_frame_from_image(render_dashboard(config, widgets), dither=True)
     assert expected_manual != expected_hourly
     expect_download(software, rejected.transfer_id, expected_manual)

@@ -1,3 +1,9 @@
+## 0.2.0-dev.24
+
+- Alternate playlist photos with a full-screen dashboard. Each gets half of the display’s configured cycle. A 60-minute cycle changes the screen every 30 minutes.
+- Drag a widget edge to resize it. Choose the Home Assistant data source for supported widgets, including Location and Display battery. The dashboard no longer includes a clock.
+- Add Home Assistant press buttons for Next, Previous, Play/Pause, and Refresh on the paired frame.
+
 ## 0.2.0-dev.23
 
 - Add **Photo details** to an overlay to show where or when the current photo was taken, or how many years have passed. Existing uploads use their saved originals. Preview a photo before assigning the overlay to a display.

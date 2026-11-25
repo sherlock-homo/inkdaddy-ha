@@ -107,6 +107,21 @@ export function Connect({ onOpenDisplay }: { onOpenDisplay: (uid: string) => voi
     void connect("pair", { code: sharingCode });
   };
 
+  const setupButtons = async (uid: string) => {
+    setBusy(true);
+    setFailed(false);
+    setMessage("Setting up Home Assistant playback buttons…");
+    try {
+      await apiJson(`/api/matter-frames/home-assistant/${encodeURIComponent(uid)}/playback-buttons`, { method: "POST" });
+      setMessage("Next, Previous, Play/Pause and Refresh are ready on the Home Assistant device page.");
+    } catch (error) {
+      setFailed(true);
+      setMessage(connectionMessage(error, "Could not set up playback buttons. Try again."));
+    } finally {
+      setBusy(false);
+    }
+  };
+
   const checkConnections = async () => {
     setBusy(true);
     try {
@@ -224,7 +239,14 @@ export function Connect({ onOpenDisplay }: { onOpenDisplay: (uid: string) => voi
         {registeredDisplays.map((device) => (
           <div className="row-item" key={device.device_uid}>
             <strong>{device.name}</strong>
-            <button className="secondary-button" onClick={() => onOpenDisplay(device.device_uid)}>Open Display</button>
+            <div className="button-row">
+              <button className="secondary-button" onClick={() => onOpenDisplay(device.device_uid)}>Open Display</button>
+              {matterDisplays.has(device.device_uid) && haDisplays.some((row) => row.device_uid === device.device_uid) && (
+                <button className="secondary-button" disabled={busy} onClick={() => void setupButtons(device.device_uid)}>
+                  Set up HA playback buttons
+                </button>
+              )}
+            </div>
           </div>
         ))}
         {registeredDisplays.length === 0 && <p>No display has connected yet.</p>}
@@ -233,7 +255,7 @@ export function Connect({ onOpenDisplay }: { onOpenDisplay: (uid: string) => voi
   );
 }
 
-function connectionMessage(error: unknown): string {
+function connectionMessage(error: unknown, fallback = "Could not connect the display. Check the sharing window and try again."): string {
   if (error instanceof Error) {
     try {
       const detail: unknown = JSON.parse(error.message).detail;
@@ -242,5 +264,5 @@ function connectionMessage(error: unknown): string {
       // Fall back to the connection message below.
     }
   }
-  return "Could not connect the display. Check the sharing window and try again.";
+  return fallback;
 }

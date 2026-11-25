@@ -37,11 +37,10 @@ def init_db() -> None:
         schema = inspect(connection)
         migrations = {
             "photos": {"framing_json": "TEXT"},
-            "devices": {"overlay_dashboard_id": "VARCHAR(128)"},
+            "devices": {"overlay_dashboard_id": "VARCHAR(128)", "interlace_dashboard_id": "VARCHAR(128)"},
             "ha_entity_cache": {"source_reported_at": "TIMESTAMP"},
             "playback": {
                 "manual_requested_at": "TIMESTAMP",
-                "first_new_interval_minute": "INTEGER",
             },
             "playback_slots": {
                 "retained_offer_id": "INTEGER",
@@ -54,31 +53,43 @@ def init_db() -> None:
             for name, type_sql in additions.items():
                 if name not in columns:
                     connection.exec_driver_sql(f"ALTER TABLE {table} ADD COLUMN {name} {type_sql}")
-        minute_columns = {
-            "playback": {"anchor_hour": "anchor_minute", "manual_request_hour": "manual_request_minute"},
-            "playback_slots": {"hour": "scheduled_minute"},
-            "playback_offers": {"hour": "scheduled_minute"},
+        # A slot key denotes an absolute wall time. Convert every reference together,
+        # including in-flight offers and paused/manual anchors from either older schema.
+        clock_columns = {
+            "playback": {
+                "anchor_second": ("anchor_minute", "anchor_hour"),
+                "manual_request_second": ("manual_request_minute", "manual_request_hour"),
+                "first_new_interval_second": ("first_new_interval_minute", None),
+            },
+            "playback_slots": {"scheduled_second": ("scheduled_minute", "hour")},
+            "playback_offers": {"scheduled_second": ("scheduled_minute", "hour")},
         }
-        hourly_upgrade = "anchor_hour" in {column["name"] for column in schema.get_columns("playback")}
-        for table, renames in minute_columns.items():
-            columns = {column["name"] for column in schema.get_columns(table)}
-            for old, new in renames.items():
-                if old in columns:
-                    connection.exec_driver_sql(f"ALTER TABLE {table} RENAME COLUMN {old} TO {new}")
-                    # Negate first to avoid transient collisions in a composite primary key.
-                    renamed_table = sql_table(table, column(new))
-                    minutes = renamed_table.c[new]
-                    connection.execute(renamed_table.update().values({minutes: minutes * -60}))
-                    connection.execute(renamed_table.update().values({minutes: -minutes}))
-                elif new not in columns:
-                    connection.exec_driver_sql(f"ALTER TABLE {table} ADD COLUMN {new} INTEGER")
+        hourly_upgrade = "anchor_hour" in {col["name"] for col in schema.get_columns("playback")}
+        for table, clocks in clock_columns.items():
+            columns = {col["name"] for col in schema.get_columns(table)}
+            for name, (minutes, hours) in clocks.items():
+                if name in columns:
+                    continue
+                old = minutes if minutes in columns else hours
+                if old not in columns:
+                    connection.exec_driver_sql(f"ALTER TABLE {table} ADD COLUMN {name} BIGINT")
+                    continue
+                connection.exec_driver_sql(f"ALTER TABLE {table} RENAME COLUMN {old} TO {name}")
+                if connection.dialect.name == "postgresql":
+                    connection.exec_driver_sql(f"ALTER TABLE {table} ALTER COLUMN {name} TYPE BIGINT")
+                renamed = sql_table(table, column(name))
+                clock = renamed.c[name]
+                multiplier = 60 if old == minutes else 3600
+                # Negate first to avoid transient collisions in the composite slot key.
+                connection.execute(renamed.update().values({clock: -clock * multiplier}))
+                connection.execute(renamed.update().values({clock: -clock}))
         if hourly_upgrade:
-            now = int(datetime.now(timezone.utc).timestamp()) // 60
-            previous_due = now - now % 60
+            now = int(datetime.now(timezone.utc).timestamp())
+            previous_due = now - now % 3600
             # The old scheduler ran hourly even when a standalone device had
             # saved another interval. Start that cadence at a future slot.
             rows = connection.execute(
-                select(Playback.device_id, Playback.anchor_minute, Playback.anchor_position,
+                select(Playback.device_id, Playback.anchor_second, Playback.anchor_position,
                        Playback.paused, Device.refresh_interval_minutes)
                 .select_from(Playback)
                 .join(Device, Device.id == Playback.device_id)
@@ -86,14 +97,15 @@ def init_db() -> None:
             ).all()
             for device_id, anchor, position, paused, interval in rows:
                 if not paused:
-                    position += max(0, previous_due - anchor) // 60
+                    position += max(0, previous_due - anchor) // 3600
                     anchor = previous_due
+                interval *= 60
                 first = previous_due + ((now - previous_due) // interval + 1) * interval
                 connection.execute(update(Playback).where(Playback.device_id == device_id).values(
-                    anchor_minute=anchor, anchor_position=position, first_new_interval_minute=first,
+                    anchor_second=anchor, anchor_position=position, first_new_interval_second=first,
                 ))
                 connection.execute(delete(PlaybackSlot).where(
-                    PlaybackSlot.device_id == device_id, PlaybackSlot.scheduled_minute > previous_due,
+                    PlaybackSlot.device_id == device_id, PlaybackSlot.scheduled_second > previous_due,
                 ))
 
 

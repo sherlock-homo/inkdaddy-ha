@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from datetime import datetime
 
-from sqlalchemy import Boolean, DateTime, Float, ForeignKey, Integer, String, Text, UniqueConstraint
+from sqlalchemy import BigInteger, Boolean, DateTime, Float, ForeignKey, Integer, String, Text, UniqueConstraint
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from .database import Base
@@ -138,6 +138,7 @@ class Device(Base, TimestampMixin):
     provisioned: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
     mesh_connected: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
     refresh_interval_minutes: Mapped[int] = mapped_column(Integer, default=60, nullable=False)
+    interlace_dashboard_id: Mapped[str | None] = mapped_column(String(128))
     overlay_dashboard_id: Mapped[str | None] = mapped_column(String(128))
     selected_source_type: Mapped[str] = mapped_column(String(32), default="dashboard", nullable=False)
     selected_source_id: Mapped[str | None] = mapped_column(String(128))
@@ -194,12 +195,12 @@ class Playback(Base):
 
     device_id: Mapped[int] = mapped_column(ForeignKey("devices.id"), primary_key=True)
     playlist_json: Mapped[str] = mapped_column(Text, default="[]", nullable=False)
-    anchor_minute: Mapped[int] = mapped_column(Integer, nullable=False)
-    first_new_interval_minute: Mapped[int | None] = mapped_column(Integer)
+    anchor_second: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    first_new_interval_second: Mapped[int | None] = mapped_column(BigInteger)
     anchor_position: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
     paused: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
     current_offer_id: Mapped[int | None] = mapped_column(Integer)
-    manual_request_minute: Mapped[int | None] = mapped_column(Integer)
+    manual_request_second: Mapped[int | None] = mapped_column(BigInteger)
     manual_requested_at: Mapped[datetime | None] = mapped_column(DateTime)
 
 
@@ -207,7 +208,7 @@ class PlaybackSlot(Base):
     __tablename__ = "playback_slots"
 
     device_id: Mapped[int] = mapped_column(ForeignKey("devices.id"), primary_key=True)
-    scheduled_minute: Mapped[int] = mapped_column(Integer, primary_key=True)
+    scheduled_second: Mapped[int] = mapped_column(BigInteger, primary_key=True)
     source_type: Mapped[str] = mapped_column(String(32), nullable=False)
     source_id: Mapped[str] = mapped_column(String(255), nullable=False)
     title: Mapped[str] = mapped_column(String(255), nullable=False)
@@ -223,7 +224,7 @@ class PlaybackOffer(Base):
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
     device_id: Mapped[int] = mapped_column(ForeignKey("devices.id"), index=True, nullable=False)
-    scheduled_minute: Mapped[int] = mapped_column(Integer, nullable=False)
+    scheduled_second: Mapped[int] = mapped_column(BigInteger, nullable=False)
     source_type: Mapped[str] = mapped_column(String(32), nullable=False)
     source_id: Mapped[str] = mapped_column(String(255), nullable=False)
     title: Mapped[str] = mapped_column(String(255), nullable=False)

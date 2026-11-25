@@ -7,14 +7,15 @@ from typing import Any
 from fastapi import APIRouter, Depends, HTTPException, Query, Response
 from PIL import Image
 from pydantic import BaseModel, Field
-from sqlalchemy import select
+from sqlalchemy import delete, select
 from sqlalchemy.orm import Session
 
 from ..config import get_settings
 from ..database import get_db
-from ..models import Dashboard, Device, Photo
+from ..models import Dashboard, DashboardVersion, Device, Photo
 from ..services.dashboard import (
     DashboardValidationError,
+    HISTORICAL_SAMPLE_DASHBOARD,
     SAMPLE_DASHBOARD,
     load_dashboard_yaml,
     validate_dashboard_config,
@@ -22,6 +23,7 @@ from ..services.dashboard import (
 from ..services.dashboard_content import (
     PhotoOverlay,
     dashboard_config,
+    editable_dashboard_yaml,
     get_dashboard_record,
     render_dashboard,
     resolve_widget_text,
@@ -55,7 +57,7 @@ def _payload(record: Dashboard | None) -> dict[str, object]:
     return {
         "id": record.slug if record else "sample",
         "name": record.name if record else "Home Overview",
-        "yaml": record.current_yaml if record else SAMPLE_DASHBOARD,
+        "yaml": editable_dashboard_yaml(record.current_yaml) if record else SAMPLE_DASHBOARD,
         "config": dashboard_config(record),
         "active": (record is None or record.slug == "sample"),
     }
@@ -145,15 +147,20 @@ def update_dashboard(
 ) -> dict[str, object]:
     begin_playback_write(db)
     record = _find(db, dashboard_id)
-    raw_yaml = str(payload.get("yaml") or (record.current_yaml if record else SAMPLE_DASHBOARD))
+    raw_yaml = str(payload.get("yaml") or (editable_dashboard_yaml(record.current_yaml) if record else SAMPLE_DASHBOARD))
     config = _parse(raw_yaml)
     name = str(payload.get("name") or config.get("name") or dashboard_id).strip()[:255]
+    previous = record.current_yaml if record else HISTORICAL_SAMPLE_DASHBOARD
     if record is None:
         record = Dashboard(slug=dashboard_id, name=name, current_yaml=raw_yaml)
         db.add(record)
     else:
         record.name = name
         record.current_yaml = raw_yaml
+    # Keep the pre-removal layout for exact repair of a previously offered image.
+    # New layouts cannot contain a clock, so this archives at most one such copy.
+    if editable_dashboard_yaml(previous) != previous:
+        record.versions.append(DashboardVersion(version_number=0, yaml=previous))
     db.commit()
     return _payload(record)
 
@@ -168,10 +175,13 @@ def delete_dashboard(dashboard_id: str, db: Session = Depends(get_db)) -> dict[s
         )
         .limit(1)
     )
-    overlay_uses = db.scalar(select(Device.id).where(Device.overlay_dashboard_id == dashboard_id).limit(1))
+    overlay_uses = db.scalar(select(Device.id).where(
+        (Device.overlay_dashboard_id == dashboard_id) | (Device.interlace_dashboard_id == dashboard_id)
+    ).limit(1))
     if dashboard_id == "sample" or device_uses or overlay_uses or playlist_uses_dashboard(db, dashboard_id):
         raise HTTPException(status_code=409, detail="This dashboard is in use.")
     record = _find(db, dashboard_id)
+    db.execute(delete(DashboardVersion).where(DashboardVersion.dashboard_id == record.id))
     db.delete(record)
     db.commit()
     return {"deleted": True}

@@ -53,3 +53,19 @@ def dashboard_eligible(entity: HAEntityCache, at: datetime) -> bool:
         return device_class in _MEASUREMENT_CLASSES
     unit = attributes.get("unit_of_measurement")
     return isinstance(unit, str) and unit in _UNCLASSIFIED_UNITS
+
+
+def battery_source(entity: HAEntityCache) -> bool:
+    attrs = entity_attributes(entity)
+    return entity.domain == "sensor" and attrs.get("device_class") == "battery" and attrs.get("unit_of_measurement") == "%"
+
+
+def battery_level(entity: HAEntityCache | None) -> str | None:
+    if not entity or not battery_source(entity) or not entity.state:
+        return None
+    try:
+        if 0 <= float(entity.state) <= 100:
+            return entity.state
+    except (ValueError, OverflowError):
+        pass
+    return None

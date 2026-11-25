@@ -71,6 +71,6 @@ class DashboardValidationTests(unittest.TestCase):
             validate_dashboard_config(
                 {
                     "grid": {"cols": 4, "rows": 2},
-                    "widgets": [{"id": "bad", "type": "big_number", "x": 0, "y": 0, "w": 4, "h": 2}],
+                    "widgets": [{"id": "bad", "type": "big_number", "x": 0, "y": 0, "w": 5, "h": 2}],
                 }
             )

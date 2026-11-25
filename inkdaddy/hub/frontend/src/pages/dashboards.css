@@ -52,6 +52,19 @@
 .dd-section-heading p { margin: 3px 0 0; color: var(--dd-muted); font-size: 12px; line-height: 1.25; overflow-wrap: anywhere; }
 .dd-add-widget { flex: 0 0 auto; }
 .dd-canvas { display: grid; grid-template: repeat(2, minmax(67px, 1fr)) / repeat(4, minmax(0, 1fr)); aspect-ratio: 5 / 3; gap: 5px; padding: 8px; background: #ded4c1; border: 1px solid #d3c7b2; border-radius: 10px; }
+.dd-tile-cell { position: relative; min-width: 0; min-height: 0; }
+.dd-tile-cell > .dd-tile { width: 100%; height: 100%; }
+.dd-resize { position: absolute; z-index: 1; min-width: 0; min-height: 0; border: 0; outline-offset: -2px; padding: 0; background: transparent; touch-action: none; user-select: none; }
+.dd-resize::after { content: ""; position: absolute; inset: 50% auto auto 50%; transform: translate(-50%, -50%); border-radius: 3px; background: var(--dd-accent); box-shadow: 0 0 0 1px white; }
+.dd-resize[data-edge="left"], .dd-resize[data-edge="right"] { top: 50%; width: 24px; height: 32px; transform: translateY(-50%); cursor: ew-resize; }
+.dd-resize[data-edge="left"] { left: -9px; }
+.dd-resize[data-edge="right"] { right: -9px; }
+.dd-resize[data-edge="left"]::after, .dd-resize[data-edge="right"]::after { width: 5px; height: 19px; }
+.dd-resize[data-edge="top"], .dd-resize[data-edge="bottom"] { left: 50%; width: 32px; height: 24px; transform: translateX(-50%); cursor: ns-resize; }
+.dd-resize[data-edge="top"] { top: -9px; }
+.dd-resize[data-edge="bottom"] { bottom: -9px; }
+.dd-resize[data-edge="top"]::after, .dd-resize[data-edge="bottom"]::after { width: 19px; height: 5px; }
+.dd-resize:focus-visible::after, .dd-resize:hover::after { background: #352255; }
 .dd-tile { display: flex; justify-content: flex-start; align-items: flex-start; flex-direction: column; gap: 5px; min-width: 0; min-height: 0; padding: 7px 6px; text-align: start; border: 1px solid #c6bca9; border-radius: 7px; cursor: pointer; color: #2a2432; background: var(--dd-paper); overflow-wrap: anywhere; }
 .dd-tile[data-filled="false"] { display: grid; place-content: center; border-style: dashed; border-color: #afa28d; background: #efe9da; }
 .dd-canvas[data-photo="true"] { background-position: center; background-size: cover; }
@@ -87,7 +100,7 @@
 .dd-entity-results { display: grid; gap: 4px; max-height: 210px; overflow-y: auto; padding: 3px; margin: -3px; }
 .dd-entity-results button { grid-template-columns: minmax(0, 1fr) minmax(0, auto); overflow-wrap: anywhere; }
 .dd-entity-results button[aria-pressed="true"] { border-color: #9b85ce; background: var(--dd-accent-pale); }
-.dd-entity-state { max-width: 54px; color: var(--dd-muted); font-size: 12px; text-align: right; }
+.dd-entity-state { max-width: 90px; overflow-wrap: normal; color: var(--dd-muted); font-size: 12px; text-align: right; }
 .dd-hint { margin: 0; font-size: 12px; line-height: 1.35; color: var(--dd-muted); }
 .dd-editor-footer, .dd-secondary-actions, .dd-preview-actions { display: flex; gap: 8px; flex-wrap: wrap; align-items: end; justify-content: space-between; }
 .dd-editor-footer { padding-top: 12px; border-top: 1px solid var(--dd-line); }
@@ -100,6 +113,10 @@
 .dd-overlay-settings label { display: grid; gap: 4px; min-width: min(150px, 100%); font-weight: 650; }
 .dd-overlay-settings select { min-height: 42px; max-width: 100%; padding: 7px 9px; border: 1px solid #ded4ef; border-radius: 8px; background: #fff; }
 .dd-secondary-actions { align-items: center; }
+@media (max-width: 540px) {
+  .dd-entity-results button { grid-template-columns: minmax(0, 1fr); gap: 2px; }
+  .dd-entity-state { max-width: 100%; text-align: start; }
+}
 .dd-page :focus-visible { outline: 2px solid #6440af; outline-offset: 3px; }
 .dd-editor-top :focus-visible { outline-color: #e7dbff; }
 .dd-tile[aria-pressed="true"]:focus-visible { outline-offset: 2px; }
