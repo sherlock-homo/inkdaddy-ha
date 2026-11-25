@@ -2,11 +2,13 @@
 
 ## Color dashboard and weekly forecast
 
-- [ ] Design the local date, condition-specific weather tiles and proportional battery graphic for the six-color panel. Check text contrast and small tiles.
-- [ ] Add a configurable seven-day forecast, defaulting to Atlanta, with local dates, units, caching and missing-data handling.
-- [ ] Add per-dashboard primary and accent colors, preserve editable layouts and remove redundant status copy.
-- [ ] Set the starter layout to date and weather above battery and forecast. Apply it to the owner's saved dashboard without changing the photo overlay or schedule.
-- [ ] Review and test the renderer, editor, old frame recovery and upgrade. Publish the app and verify the actual dashboard sent over Matter.
+- [x] Design the local date, condition-specific weather tiles and proportional battery graphic for the six-color panel. Check text contrast and small tiles.
+- [x] Add a configurable seven-day forecast, defaulting to Atlanta, with local dates, units, caching and missing-data handling.
+- [x] Add per-dashboard primary and accent colors, preserve editable layouts and remove redundant status copy.
+- [x] Set the starter layout to date and weather above battery and forecast. Apply it to the owner's saved dashboard without changing the photo overlay or schedule.
+- [x] Review and test the renderer, editor, old frame recovery and upgrade. Publish the app and verify the actual dashboard sent over Matter.
+
+Dev.26 passed 307 Python tests and six controller tests on the Mac and in the Home Assistant package. Desktop Chrome and mobile WebKit verified the editor. All 15 weather scenes passed the 4.5:1 text contrast check. The installed app matched the tested package. The paired v7 frame acknowledged its redesigned dashboard over Thread, and its decoded frame matched the reference rendering pixel for pixel across all six inks. The frame then acknowledged the original photo with its metadata overlay. Pairing, playlist, and the alternating schedule matched their pre-upgrade state.
 
 ## Dashboard date, weather, and photo overlay repair
 
