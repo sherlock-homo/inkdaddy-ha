@@ -302,7 +302,7 @@ grid: {cols: 4, rows: 2}
 widgets:
   - id: weather
     type: weather_summary
-    x: 2
+    x: 1
     y: 0
     w: 2
     h: 1
@@ -310,17 +310,17 @@ widgets:
     options: {label: Weather}
   - id: forecast
     type: weather_summary
-    x: 2
+    x: 0
     y: 1
-    w: 2
+    w: 4
     h: 1
     source: {type: forecast, location: 'Atlanta, GA', latitude: 33.749, longitude: -84.388, timezone: America/New_York}
     options: {label: 7-day forecast}
   - id: battery
     type: big_number
-    x: 0
-    y: 1
-    w: 2
+    x: 3
+    y: 0
+    w: 1
     h: 1
     source: {type: device_battery}
     options: {label: Battery}
@@ -328,8 +328,35 @@ widgets:
     type: entity_state
     x: 0
     y: 0
-    w: 2
+    w: 1
     h: 1
     source: {type: date}
     options: {label: Date}
 """
+
+
+# Geometry identifies the old overview even when the owner chose custom labels,
+# sources, a different forecast city or a new name in the visual editor.
+_DEV28_OVERVIEW_POSITIONS = {"date": (0, 0), "weather": (2, 0), "device_battery": (0, 1), "forecast": (2, 1)}
+
+
+def upgrade_overview_layout(source: str) -> str | None:
+    try:
+        config = load_dashboard_yaml(source)
+        widgets = validate_dashboard_config(config)["widgets"]
+    except DashboardValidationError:
+        return None
+    kinds = [w["source"].get("type") for w in widgets]
+    if len(widgets) != 4 or any(not isinstance(kind, str) for kind in kinds) or set(kinds) != _DEV28_OVERVIEW_POSITIONS.keys():
+        return None
+    if any((w["x"], w["y"]) != _DEV28_OVERVIEW_POSITIONS[kind] or (w["w"], w["h"]) != (2, 1)
+           for w, kind in zip(widgets, kinds)):
+        return None
+    target = {w["source"]["type"]: w for w in load_dashboard_yaml(SAMPLE_DASHBOARD)["widgets"]}
+    for w, kind in zip(config["widgets"], kinds):
+        w.update({key: target[kind][key] for key in ("x", "y", "w", "h")})
+    try:
+        validate_dashboard_config(config)
+    except DashboardValidationError:  # Imported widgets can restrict their allowed sizes.
+        return None
+    return json.dumps(config, indent=2, ensure_ascii=False)

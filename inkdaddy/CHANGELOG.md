@@ -1,3 +1,9 @@
+## 0.2.0-dev.29
+
+- The dashboard grid fills the frame. The starter layout puts the date, current weather and battery across the top and the seven-day forecast across the bottom.
+- Move and resize tiles throughout the canvas. The dashboard name stays in the editor.
+- The weekly forecast uses 7Timer! and shows the provider in the widget settings.
+
 ## 0.2.0-dev.28
 
 - Photo details use separate inks for the capture date, elapsed time and location.

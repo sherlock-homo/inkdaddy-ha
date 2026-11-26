@@ -54,6 +54,10 @@ class ForecastText(WidgetText):
     days: tuple[ForecastDay, ...] = ()
 
 
+class _Dev28ForecastText(ForecastText):
+    """Historical photo overlays included a provider footer in the checksummed pixels."""
+
+
 class PhotoCaption(WidgetText):
     """Original monochrome caption, retained for replaying previously offered frames."""
 
@@ -76,7 +80,7 @@ class PhotoOverlay:
             {"x": tile["x"], "y": tile["y"], "w": tile["w"],
              "agenda": isinstance(widget, AgendaText), "text": asdict(widget),
              **({"caption": True} if isinstance(widget, (PhotoCaption, PhotoDetailsCaption)) else {}),
-             **({"forecast": True, "accent": tile.get("accent", self.config.get("theme", {}).get("accent", "yellow"))}
+             **({"forecast": True if isinstance(widget, _Dev28ForecastText) else 2, "accent": tile.get("accent", self.config.get("theme", {}).get("accent", "yellow"))}
                 if isinstance(widget, ForecastText) else {}),
              **({"h": 2} if tile.get("h") == 2 else {})}
             for tile, widget in zip(self.config["widgets"], self.widgets, strict=True)
@@ -89,7 +93,8 @@ class PhotoOverlay:
             if tile.get("forecast"):
                 fields = tile["text"]
                 days = tuple(ForecastDay(**item) for item in fields["days"])
-                widgets.append(ForecastText(**{**fields, "days": days}))
+                forecast_class = _Dev28ForecastText if tile["forecast"] is True else ForecastText
+                widgets.append(forecast_class(**{**fields, "days": days}))
             elif tile.get("caption"):
                 fields = tile["text"]
                 widgets.append(PhotoDetailsCaption(**fields) if "taken" in fields else PhotoCaption(**fields))
@@ -126,7 +131,8 @@ class PhotoOverlay:
                 height = 444 if tile.get("h") == 2 else 114
                 y = 462 - height if tile["y"] else 18
                 accent = tile.get("accent", self.config.get("theme", {}).get("accent", "yellow"))
-                overlay.paste(render_forecast_tile((w, height), widget, accent), (x, y))
+                art = render_forecast_tile((w, height), widget, accent, legacy=isinstance(widget, _Dev28ForecastText))
+                overlay.paste(art, (x, y))
                 continue
             agenda = isinstance(widget, AgendaText)
             lines = _agenda_lines(widget) if agenda else ()
@@ -179,7 +185,7 @@ def editable_dashboard_yaml(source: str, *, restore_starter_date: bool = True) -
                 starter_clock = next(w for w in load_dashboard_yaml(HISTORICAL_SAMPLE_DASHBOARD)["widgets"]
                                      if w["source"]["type"] == "clock")
                 if starter_clock in widgets:
-                    date = next(w for w in load_dashboard_yaml(SAMPLE_DASHBOARD)["widgets"]
+                    date = next(w for w in load_dashboard_yaml(DEV25_SAMPLE_DASHBOARD)["widgets"]
                                 if w["source"]["type"] == "date")
                     if any(isinstance(item, dict) and item.get("id") == date["id"] for item in kept):
                         date["id"] = starter_clock["id"]
@@ -448,10 +454,12 @@ def _entity_widget_text(
     return WidgetText(label or entity.name or entity.entity_id, value, detail)
 
 
-def render_dashboard(config: dict[str, Any], widgets: list[WidgetText]) -> Image.Image:
+def render_dashboard(config: dict[str, Any], widgets: list[WidgetText], *, art_version: int = 2) -> Image.Image:
     from .dashboard_art import render_modern_dashboard
 
-    return render_modern_dashboard(config, widgets)
+    if art_version not in (1, 2):
+        raise ValueError("Unsupported dashboard art version.")
+    return render_modern_dashboard(config, widgets, legacy=art_version == 1)
 
 
 def render_legacy_dashboard(config: dict[str, Any], widgets: list[WidgetText]) -> Image.Image:

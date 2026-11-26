@@ -25,11 +25,10 @@ _MAX_RESPONSE = 64 * 1024
 _refresh_lock = Lock()
 _FETCH_ERRORS = (OSError, HTTPException, ValueError, RecursionError)
 _CONDITIONS = {
-    0: "sunny", 1: "sunny", 2: "partlycloudy", 3: "cloudy", 45: "fog", 48: "fog",
-    51: "rainy", 53: "rainy", 55: "rainy", 56: "snowy-rainy", 57: "snowy-rainy",
-    61: "rainy", 63: "rainy", 65: "pouring", 66: "snowy-rainy", 67: "snowy-rainy",
-    71: "snowy", 73: "snowy", 75: "snowy", 77: "snowy", 80: "rainy", 81: "rainy",
-    82: "pouring", 85: "snowy", 86: "snowy", 95: "lightning-rainy", 96: "hail", 99: "hail",
+    "clear": "sunny", "pcloudy": "partlycloudy", "mcloudy": "cloudy", "cloudy": "cloudy",
+    "humid": "fog", "fog": "fog", "windy": "windy", "lightrain": "rainy", "oshower": "rainy",
+    "ishower": "rainy", "rain": "pouring", "lightsnow": "snowy", "snow": "snowy",
+    "rainsnow": "snowy-rainy", "ts": "lightning", "tsrain": "lightning-rainy",
 }
 
 
@@ -51,7 +50,7 @@ class ForecastPlace:
 
     @property
     def key(self) -> str:
-        return f"{self.latitude:.3f},{self.longitude:.3f},{self.timezone},{self.unit}"
+        return f"7timer:{self.latitude:.3f},{self.longitude:.3f},{self.timezone},{self.unit}"
 
 
 def forecast_place(source: dict[str, Any]) -> ForecastPlace:
@@ -121,33 +120,86 @@ def forecast_requests(config: dict[str, Any]) -> set[ForecastPlace]:
     return {forecast_place(w["source"]) for w in config["widgets"] if w["source"].get("type") == "forecast"}
 
 
-def _forecast_rows(place: ForecastPlace, now: datetime) -> list[dict[str, Any]]:
-    result = _read_provider("api.open-meteo.com", "/v1/forecast", {
-        "latitude": place.latitude, "longitude": place.longitude, "timezone": place.timezone,
-        "daily": "weather_code,temperature_2m_max,temperature_2m_min", "forecast_days": 9,
-        "temperature_unit": "fahrenheit" if place.unit == "F" else "celsius",
+def _temperature(celsius: float, unit: str) -> int:
+    return round(celsius * 9 / 5 + 32 if unit == "F" else celsius)
+
+
+def _forecast_feed(place: ForecastPlace, product: str) -> dict[str, Any]:
+    data = _read_provider("www.7timer.info", "/bin/api.pl", {
+        "lat": place.latitude, "lon": place.longitude, "product": product, "output": "json", "unit": "metric",
     })
-    daily = result.get("daily")
-    units = result.get("daily_units")
-    fields = ("time", "temperature_2m_max", "temperature_2m_min", "weather_code")
-    if not isinstance(daily, dict) or not isinstance(units, dict) or not all(
-        isinstance(daily.get(k), list) for k in fields
-    ) or any(units.get(k) != "°" + place.unit for k in fields[1:3]):
-        raise ValueError("Invalid daily forecast.")
-    rows = []
-    today = now.astimezone(ZoneInfo(place.timezone)).date()
-    for when, high, low, code in zip(*(daily[k][:9] for k in fields), strict=True):
-        if not isinstance(when, str) or len(when) != 10 or type(code) is not int or code not in _CONDITIONS:
+    if data.get("product") != product or not isinstance(data.get("dataseries"), list):
+        raise ValueError("Invalid forecast response.")
+    return data
+
+
+def _boundary_days(place: ForecastPlace, wanted: set[date]) -> list[ForecastDay]:
+    # CIVIL Light publishes seven dates. Its three-hour companion spans eight
+    # days, so slots just across local midnight can still show a complete week.
+    feed = _forecast_feed(place, "civil")
+    stamp = feed.get("init")
+    if not isinstance(stamp, str) or len(stamp) != 10:
+        raise ValueError("Invalid forecast issue time.")
+    issued = datetime.strptime(stamp, "%Y%m%d%H").replace(tzinfo=timezone.utc)
+    zone = ZoneInfo(place.timezone)
+    by_day: dict[date, dict[int, tuple[float, str]]] = {}
+    for row in feed["dataseries"][:64]:
+        if not isinstance(row, dict):
             continue
-        if any(type(t) not in (int, float) or not -260 <= t <= 260 for t in (high, low)) or high < low:
+        hour, temp, code = row.get("timepoint"), row.get("temp2m"), row.get("weather")
+        if (type(hour) is not int or not 0 < hour <= 192 or hour % 3 or type(temp) not in (int, float)
+                or not -90 <= temp <= 65 or not isinstance(code, str)):
             continue
-        day = date.fromisoformat(when)
-        if today <= day <= today + timedelta(days=8):
-            rows.append(asdict(ForecastDay(day.isoformat(), round(high), round(low), _CONDITIONS[code])))
-    required = {(today + timedelta(days=i)).isoformat() for i in range(7)}
-    if not required.issubset(row["date"] for row in rows):
+        local = (issued + timedelta(hours=hour)).astimezone(zone)
+        condition = _CONDITIONS.get(code.removesuffix("night").removesuffix("day"))
+        if local.date() in wanted and condition:
+            by_day.setdefault(local.date(), {})[hour] = (temp, condition)
+    days = []
+    for day, samples in by_day.items():
+        # With a DST transition a complete local day has 7–9 samples.
+        midnight = datetime.combine(day, datetime.min.time(), tzinfo=zone).astimezone(timezone.utc)
+        end = datetime.combine(day + timedelta(days=1), datetime.min.time(), tzinfo=zone).astimezone(timezone.utc)
+        start_hour = int((midnight - issued).total_seconds() // 3600)
+        expected = {h for h in range(start_hour, start_hour + 27)
+                    if h % 3 == 0 and midnight <= issued + timedelta(hours=h) < end}
+        if not expected or expected != samples.keys():
+            continue
+        midday = min(samples, key=lambda h: abs((issued + timedelta(hours=h)).astimezone(zone).hour - 12))
+        temps = [t for t, _ in samples.values()]
+        days.append(ForecastDay(day.isoformat(), _temperature(max(temps), place.unit),
+                                _temperature(min(temps), place.unit), samples[midday][1]))
+    return days
+
+
+def _forecast_rows(place: ForecastPlace, now: datetime) -> list[dict[str, Any]]:
+    local_now = now.astimezone(ZoneInfo(place.timezone))
+    today = local_now.date()
+    requested = {today + timedelta(days=i) for i in range(7)}
+    tomorrow_week_end = today + timedelta(days=7)
+    rows: dict[date, ForecastDay] = {}
+    for row in _forecast_feed(place, "civillight")["dataseries"][:9]:
+        if not isinstance(row, dict):
+            continue
+        stamp, temps, code = row.get("date"), row.get("temp2m"), row.get("weather")
+        if type(stamp) is not int or len(str(stamp)) != 8 or not isinstance(temps, dict) or not isinstance(code, str):
+            continue
+        high, low = temps.get("max"), temps.get("min")
+        condition = _CONDITIONS.get(code)
+        if not condition or any(type(t) not in (int, float) or not -90 <= t <= 65 for t in (low, high)) or high < low:
+            continue
+        day = datetime.strptime(str(stamp), "%Y%m%d").date()
+        if today <= day <= tomorrow_week_end:
+            rows[day] = ForecastDay(day.isoformat(), _temperature(high, place.unit),
+                                    _temperature(low, place.unit), condition)
+    missing = (requested | {tomorrow_week_end}) - rows.keys()
+    if rows and (requested - rows.keys() or (missing and local_now.hour >= 20)):
+        try:
+            rows.update((date.fromisoformat(day.date), day) for day in _boundary_days(place, missing))
+        except _FETCH_ERRORS:
+            pass  # A complete daily feed is usable while its companion is down.
+    if not (requested.issubset(rows) or {day + timedelta(days=1) for day in requested}.issubset(rows)):
         raise ValueError("Incomplete seven-day forecast.")
-    return rows
+    return [asdict(rows[day]) for day in sorted(rows)]
 
 
 def _refresh_place(engine: Engine, place: ForecastPlace, now: datetime) -> None:
@@ -179,7 +231,9 @@ def _refresh_place(engine: Engine, place: ForecastPlace, now: datetime) -> None:
         row = db.get(ForecastCache, place.key)
         if row and row.retry_at == utc + _RETRY:
             row.fetched_at = utc
-            row.retry_at = utc + _REFRESH
+            midnight = datetime.combine(now.astimezone(ZoneInfo(place.timezone)).date() + timedelta(days=1),
+                                        datetime.min.time(), tzinfo=ZoneInfo(place.timezone))
+            row.retry_at = min(utc + _REFRESH, midnight.astimezone(timezone.utc).replace(tzinfo=None))
             row.days_json = json.dumps(days, separators=(",", ":"))
             db.commit()
 
@@ -203,5 +257,9 @@ def forecast_days(db: Session, place: ForecastPlace, when: datetime, observed_at
     start = when.astimezone(ZoneInfo(place.timezone)).date()
     # Require the seven requested local dates in order; never relabel a missing day.
     by_date = {day["date"]: day for day in json.loads(row.days_json)}
+    # Some model runs already start tomorrow evening local time. Use their seven
+    # actual dates only when the first date is exactly one day ahead.
+    if by_date and min(by_date) == (start + timedelta(days=1)).isoformat():
+        start += timedelta(days=1)
     days = [by_date.get((start + timedelta(days=i)).isoformat()) for i in range(7)]
     return tuple(ForecastDay(**day) for day in days) if all(days) else ()

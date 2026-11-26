@@ -1,5 +1,13 @@
 # inkDaddy Home Assistant repository checklist
 
+## Full-screen dashboard layout
+
+- [x] Open the entire frame to the dashboard grid and match the editor and preview to it.
+- [x] Arrange Date, Current weather and Battery across the top and expand the seven-day forecast across the bottom.
+- [x] Remove the provider footer from the forecast and keep the data source identifiable in its settings.
+- [x] Preserve customized dashboards and existing frame receipts when upgrading.
+- [ ] Check the packaged app, deploy it and verify the dashboard offered to the paired frame.
+
 ## Photo caption colors and place names
 
 - [x] Render the capture date, elapsed time and location in three distinguishable inks. Preserve older frame receipts.

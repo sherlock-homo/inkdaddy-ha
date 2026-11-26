@@ -420,7 +420,7 @@ def repair_playback_frame(db: Session, device: Device, slot: PlaybackSlot, frame
                     widgets.append(AgendaText(**values))
                 else:
                     widgets.append(WidgetText(**values))
-            image = render_dashboard(snapshot["config"], widgets)
+            image = render_dashboard(snapshot["config"], widgets, art_version=snapshot.get("art_version", 1))
         except (KeyError, IndexError, TypeError, AttributeError) as exc:
             raise ValueError("The saved dashboard snapshot is invalid.") from exc
         raw, digest = raw_frame_from_image(image, dither=True)
@@ -491,7 +491,7 @@ def _prepare_slot(
             time_kind="manual" if manual_requested_at is not None else "scheduled",
         )
         title = dashboard.name if dashboard else str(config.get("name", "Home Overview"))
-        dashboard_snapshot = {"config": config, "widgets": [asdict(widget) for widget in widgets]}
+        dashboard_snapshot = {"art_version": 2, "config": config, "widgets": [asdict(widget) for widget in widgets]}
         version = ("color-dashboard-v1", source.type, source.id, title, dashboard_snapshot)
         if repair_frame is not None and slot is not None:
             if slot.render_key != _render_key(version):

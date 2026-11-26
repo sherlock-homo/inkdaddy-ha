@@ -197,7 +197,7 @@ def _weather_tile(size: tuple[int, int], widget: WidgetText) -> Image.Image:
     return tile
 
 
-def _battery_tile(size: tuple[int, int], widget: WidgetText) -> Image.Image:
+def _battery_tile(size: tuple[int, int], widget: WidgetText, *, vertical: bool = False) -> Image.Image:
     w, h = size
     tile = Image.new("RGB", size, BLACK)
     d = _drawing(tile)
@@ -210,6 +210,26 @@ def _battery_tile(size: tuple[int, int], widget: WidgetText) -> Image.Image:
             raise ValueError
     except ValueError:
         _text(d, widget.value, pad, h // 2, w - 2 * pad, 36, WHITE)
+        return tile
+    if vertical:
+        body_h = min(h - 74, 160)
+        body_w = min(w - 2 * pad, round(body_h * 0.67))
+        left = (w - body_w) // 2
+        top = (h + 46 - body_h) // 2 + 3
+        cap = body_w // 4
+        d.rounded_rectangle((left + cap, top - 7, left + body_w - cap, top + 1), radius=3, fill=WHITE)
+        d.rounded_rectangle((left, top, left + body_w, top + body_h), radius=11, fill=WHITE)
+        inner_w, inner_h = body_w - 14, body_h - 14
+        track = Image.new("RGB", (inner_w, inner_h), WHITE)
+        track_draw = _drawing(track)
+        amount = round(inner_h * level / 100)
+        if amount:
+            track_draw.rectangle((0, inner_h - amount, inner_w - 1, inner_h - 1),
+                                 fill=RED if level <= 20 else YELLOW if level <= 50 else GREEN)
+        d.rounded_rectangle((left + 4, top + 4, left + body_w - 4, top + body_h - 4), radius=7, fill=BLACK)
+        _text(track_draw, widget.value, inner_w // 2, inner_h // 2, inner_w - 6, 39, BLACK,
+              weight=750, anchor="mm")
+        tile.paste(track, (left + 7, top + 7))
         return tile
     outer_w = min(w - 2 * pad - 12, 370)
     outer_h = min(87, h - 77, outer_w // 2)
@@ -244,7 +264,7 @@ def _battery_tile(size: tuple[int, int], widget: WidgetText) -> Image.Image:
 
 
 def render_forecast_tile(
-    size: tuple[int, int], forecast: WidgetText, accent: str = "yellow"
+    size: tuple[int, int], forecast: WidgetText, accent: str = "yellow", *, legacy: bool = False
 ) -> Image.Image:
     w, h = size
     bg = _INKS.get(accent, YELLOW)
@@ -280,9 +300,11 @@ def render_forecast_tile(
     if not days:
         _text(d, forecast.detail or "Forecast unavailable", pad, h // 2 + 4, w - 2 * pad, 21, fg)
         return tile
-    footer_y = h - 16
-    _text(d, "open-meteo.com", w - pad, footer_y, w - 2 * pad, 12, fg, weight=500, anchor="rt")
-    band_h = footer_y - band_top - 3
+    bottom = h - (16 if legacy else 6)
+    if legacy:
+        _text(d, "open-meteo.com", w - pad, bottom, w - 2 * pad, 12, fg, weight=500, anchor="rt")
+    band_h = bottom - band_top - 3
+    wide = not legacy and w >= 600 and h >= 175
     col = (w - 2 * pad) / 7
     if not compact:
         d.line((pad, band_top - 5, w - pad, band_top - 5), fill=fg, width=1)
@@ -291,19 +313,19 @@ def render_forecast_tile(
         label = date.fromisoformat(day.date).strftime("%a")
         _text(
             d,
-            label[:1] if compact else label[:3],
+            date.fromisoformat(day.date).strftime("%A") if wide else label[:1] if compact else label,
             x,
             band_top,
             int(col) - 2,
-            13 if short else 16,
+            21 if wide else 13 if short else 16,
             fg,
             anchor="mt",
         )
         high_y, low_y = band_top + round(band_h * 0.61), band_top + round(band_h * 0.82)
         # Tiny photo overlays use the compact text rows; dashboard tiles have room for sky symbols.
         if band_h >= 81:
-            icon_size = min(int(col) - 5, 42, max(16, band_h // 3))
-            icon_y = band_top + (18 if compact else 22)
+            icon_size = min(int(col) - 5, 68 if wide else 42, max(16, band_h // 3))
+            icon_y = band_top + (29 if wide else 18 if compact else 22)
             condition = day.condition
             symbol = Image.new("RGB", (128, 128), WEATHER_SKIES.get(condition, WHITE))
             _paste_symbol(symbol, condition, 0, 0, 128)
@@ -319,7 +341,7 @@ def render_forecast_tile(
             x,
             high_y,
             int(col) - 1,
-            16 if short or compact else 25,
+            33 if wide else 16 if short or compact else 25,
             fg,
             weight=800,
             anchor="mt",
@@ -330,7 +352,7 @@ def render_forecast_tile(
             x,
             low_y,
             int(col) - 1,
-            13 if short or compact else 17,
+            21 if wide else 13 if short or compact else 17,
             fg,
             weight=500,
             anchor="mt",
@@ -360,35 +382,49 @@ def _generic_tile(
     return tile
 
 
-def render_modern_dashboard(config: dict[str, Any], widgets: list[WidgetText]) -> Image.Image:
+def render_modern_dashboard(
+    config: dict[str, Any], widgets: list[WidgetText], *, legacy: bool = False
+) -> Image.Image:
     theme = config.get("theme") or {}
     primary = _INKS.get(theme.get("primary"), BLUE)
     accent_name = theme.get("accent", "yellow")
     accent = _INKS.get(accent_name, YELLOW)
     image = Image.new("RGB", (800, 480), WHITE)
-    d = _drawing(image)
-    _text(d, str(config.get("name") or "Home Overview"), 17, 13, 622, 33, BLACK, weight=750)
-    swatches = [primary, accent, GREEN, RED, BLUE, BLACK]
-    for i, ink in enumerate(swatches):
-        x = 652 + i * 22
-        d.polygon(((x + 7, 17), (x + 23, 17), (x + 15, 36), (x, 36)), fill=ink)
+    if legacy:
+        # Offers from dev.26–28 included a masthead in their checksummed artwork.
+        d = _drawing(image)
+        _text(d, str(config.get("name") or "Home Overview"), 17, 13, 622, 33, BLACK, weight=750)
+        swatches = [primary, accent, GREEN, RED, BLUE, BLACK]
+        for i, ink in enumerate(swatches):
+            x = 652 + i * 22
+            d.polygon(((x + 7, 17), (x + 23, 17), (x + 15, 36), (x, 36)), fill=ink)
     for tile, widget in zip(config["widgets"], widgets, strict=True):
-        x, y = 14 + tile["x"] * 195, 60 + tile["y"] * 205
-        size = (tile["w"] * 195 - 7, tile["h"] * 205 - 7)
+        if legacy:
+            x, y = 14 + tile["x"] * 195, 60 + tile["y"] * 205
+            size = (tile["w"] * 195 - 7, tile["h"] * 205 - 7)
+        else:
+            # Gutters separate cells inside the grid. Tiles reach every exterior edge.
+            right_cell = tile["x"] + tile["w"]
+            bottom_cell = tile["y"] + tile["h"]
+            x = tile["x"] * 200 + (3 if tile["x"] else 0)
+            y = tile["y"] * 240 + (3 if tile["y"] else 0)
+            right = right_cell * 200 - (3 if right_cell < 4 else 0)
+            bottom = bottom_cell * 240 - (3 if bottom_cell < 2 else 0)
+            size = (right - x, bottom - y)
         kind = tile.get("source", {}).get("type")
         if kind == "date":
             art = _date_tile(size, widget, primary, accent)
         elif kind == "device_battery":
-            art = _battery_tile(size, widget)
+            art = _battery_tile(size, widget, vertical=not legacy and size[0] < 250)
         elif kind == "forecast":
-            art = render_forecast_tile(size, widget, accent_name)
+            art = render_forecast_tile(size, widget, accent_name, legacy=legacy)
         elif tile["type"] == "weather_summary" or kind == "weather":
             art = _weather_tile(size, widget)
         else:
             art = _generic_tile(size, widget, kind, accent)
-        mask = Image.new("L", size)
-        ImageDraw.Draw(mask).rounded_rectangle(
-            (0, 0, size[0] - 1, size[1] - 1), radius=13, fill=255
-        )
+        mask = None
+        if legacy:
+            mask = Image.new("L", size)
+            ImageDraw.Draw(mask).rounded_rectangle((0, 0, size[0] - 1, size[1] - 1), radius=13, fill=255)
         image.paste(art, (x, y), mask)
     return image

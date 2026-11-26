@@ -27,7 +27,8 @@ SessionLocal = sessionmaker(bind=engine, autoflush=False, autocommit=False, expi
 
 
 def init_db() -> None:
-    from .models import Device, Playback, PlaybackSlot
+    from .models import Dashboard, Device, Playback, PlaybackSlot, Setting
+    from .services.dashboard import upgrade_overview_layout
 
     settings.ensure_data_dirs()
     with engine.begin() as connection:
@@ -110,6 +111,15 @@ def init_db() -> None:
                 connection.execute(delete(PlaybackSlot).where(
                     PlaybackSlot.device_id == device_id, PlaybackSlot.scheduled_second > previous_due,
                 ))
+        # Apply this preset change once per installation so restoring the four
+        # equal tiles in the editor is a durable user choice.
+        marker = "dashboard.overview_layout_dev29"
+        if connection.scalar(select(Setting.key).where(Setting.key == marker)) is None:
+            for layout_id, source in connection.execute(select(Dashboard.id, Dashboard.current_yaml)):
+                updated = upgrade_overview_layout(source)
+                if updated is not None:
+                    connection.execute(update(Dashboard).where(Dashboard.id == layout_id).values(current_yaml=updated))
+            connection.execute(Setting.__table__.insert().values(key=marker, value_json="true"))
 
 
 def get_db() -> Generator[Session, None, None]:

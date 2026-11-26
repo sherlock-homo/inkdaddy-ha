@@ -379,7 +379,10 @@ function DashboardEditor({ dashboard, devices, heading, onSave, onDelete, restor
             change({ ...draft, name: draft.name || preset.name, widgets: presetWidgets(preset) });
             setTile(tiles[0]);
             focusInspector();
-          }}><span className="dd-preset-diagram" data-preset={id} aria-hidden="true"><i /><i /><i /><i /></span>
+          }}><span className="dd-preset-diagram" aria-hidden="true">
+            {presetWidgets(preset).map(({ id, x, y, w, h }) => <i key={id}
+              style={{ gridColumn: `${x + 1} / span ${w}`, gridRow: `${y + 1} / span ${h}` }} />)}
+          </span>
             <span><strong>{preset.name}</strong><small>{preset.detail}</small></span></button>)}</div>
         </section>}
         <DashboardColors theme={theme} disabled={Boolean(busy)} onChange={(colors) => change({ ...draft, theme: { ...draft.theme, ...colors } })} />
@@ -438,7 +441,7 @@ function DashboardEditor({ dashboard, devices, heading, onSave, onDelete, restor
             }}><option value="">Any display</option>
               {devices.map((device) => <option key={device.device_uid} value={device.device_uid}>{device.name}</option>)}
             </select></label>}
-            <button type="button" className="secondary-button" disabled={Boolean(busy) || !draft.widgets.length || (previewMode === "photo" && !previewPhoto)}
+            <button type="button" className="secondary-button" disabled={Boolean(busy) || (previewMode === "photo" && !previewPhoto)}
               onClick={() => void preview()}>{busy === "preview" ? "Rendering…" : "Preview"}</button>
           </div>
           <button type="submit" className="primary-button" disabled={Boolean(busy) || !draft.name.trim()}>{busy === "save" ? "Saving…" : "Save dashboard"}</button>

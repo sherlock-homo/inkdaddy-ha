@@ -356,3 +356,54 @@ def test_dev23_minute_clock_preserves_pending_offer_pause_and_manual_times(monke
         assert transfer.playback_offer_id == state.current_offer_id == 3
         assert db.get(PlaybackOffer, 3).scheduled_second == 3600
     engine.dispose()
+
+
+def test_overview_upgrade_preserves_sources_and_later_layout_edits(monkeypatch):
+    import json
+    from copy import deepcopy
+
+    from inkdaddy_hub import database
+    from inkdaddy_hub.models import Dashboard
+    from inkdaddy_hub.services.dashboard import SAMPLE_DASHBOARD, load_dashboard_yaml
+
+    engine = create_engine("sqlite://")
+    Base.metadata.create_all(engine)
+    old = load_dashboard_yaml(SAMPLE_DASHBOARD)
+    old["name"] = "Household"
+    old["theme"] = {"primary": "black", "accent": "green"}
+    previous = {"forecast": (2, 1), "date": (0, 0), "device_battery": (0, 1), "weather": (2, 0)}
+    for item in old["widgets"]:
+        kind = item["source"]["type"]
+        item.update(x=previous[kind][0], y=previous[kind][1], w=2, h=1, id=f"custom-{kind}")
+        if kind == "weather":
+            item["source"]["entity_id"] = "weather.test"
+        if kind == "forecast":
+            item["source"].update(location="Paris", latitude=48.857, longitude=2.352, timezone="Europe/Paris", unit="C")
+        item["options"]["label"] = f"My {kind}"
+
+    # Existing dashboards and frontend presets can store widgets in any order.
+    old["widgets"].reverse()
+    source = json.dumps(old)
+    custom = deepcopy(old)
+    custom["widgets"][0]["w"] = 1
+    untouched = json.dumps(custom)
+    with Session(engine) as db:
+        db.add_all([Dashboard(id=1, name="Household", slug="mine", current_yaml=source),
+                    Dashboard(id=2, name="Custom", slug="custom", current_yaml=untouched)])
+        db.commit()
+    monkeypatch.setattr(database, "engine", engine)
+    database.init_db()
+    with Session(engine) as db:
+        assert db.get(Dashboard, 2).current_yaml == untouched
+        migrated = load_dashboard_yaml(db.get(Dashboard, 1).current_yaml)
+        expected = deepcopy(old)
+        rectangles = {"date": (0, 0, 1), "weather": (1, 0, 2), "device_battery": (3, 0, 1), "forecast": (0, 1, 4)}
+        for item in expected["widgets"]:
+            item["x"], item["y"], item["w"] = rectangles[item["source"]["type"]]
+        assert migrated == expected
+        db.get(Dashboard, 1).current_yaml = source
+        db.commit()
+    database.init_db()
+    with Session(engine) as db:
+        assert db.get(Dashboard, 1).current_yaml == source
+    engine.dispose()

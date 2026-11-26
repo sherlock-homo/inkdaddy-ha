@@ -1254,3 +1254,20 @@ def test_unreadable_alternating_photo_uses_configured_dashboard(catalog):
     playback.update_playback_schedule(db, device, 60, "chosen", NOW)
     assert refresh_playback_slots(db, device, now=NOW).source_id == "chosen"
     assert {slot["source_id"] for slot in playback_status(db, device, NOW)["upcoming"]} == {"chosen"}
+
+
+def test_unversioned_dashboard_snapshot_repairs_the_original_matter_offer(catalog, monkeypatch):
+    db, device, _photo = catalog
+    paint = playback.render_dashboard
+    with monkeypatch.context() as old:
+        old.setattr(playback, "render_dashboard", lambda config, widgets: paint(config, widgets, art_version=1))
+        offered = prepare_matter_frame(db, device.device_uid, now=NOW)
+    slot = db.get(PlaybackSlot, (device.id, playback.epoch_second(offered.scheduled_at)))
+    snapshot = json.loads(slot.dashboard_render_json)
+    assert snapshot.pop("art_version") == 2
+    slot.dashboard_render_json = json.dumps(snapshot)
+    db.commit()
+    frame = db.scalar(select(Frame).where(Frame.frame_id == offered.frame_id))
+    Path(frame.path).unlink()
+    assert prepare_matter_frame(db, device.device_uid, now=NOW, repair_cache=True) == offered
+    assert Path(frame.path).read_bytes() == offered.payload

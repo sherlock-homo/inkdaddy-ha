@@ -94,8 +94,8 @@ export function createWidget(kind: WidgetKind, tile: Tile, widgets: DashboardWid
 
 export const dashboardPresets: Record<string, { name: string; detail: string; widgets: [WidgetKind, Tile, number?][] }> = {
   home: { name: "Daily overview", detail: "Date, weather, battery and 7-day forecast", widgets: [
-    ["date", { x: 0, y: 0 }, 2], ["weather", { x: 2, y: 0 }, 2],
-    ["device_battery", { x: 0, y: 1 }, 2], ["forecast", { x: 2, y: 1 }, 2]
+    ["date", { x: 0, y: 0 }, 1], ["weather", { x: 1, y: 0 }, 2],
+    ["device_battery", { x: 3, y: 0 }, 1], ["forecast", { x: 0, y: 1 }, 4]
   ] },
   glance: { name: "At a glance", detail: "Date and display battery", widgets: [
     ["date", { x: 0, y: 0 }, 2], ["device_battery", { x: 2, y: 0 }]

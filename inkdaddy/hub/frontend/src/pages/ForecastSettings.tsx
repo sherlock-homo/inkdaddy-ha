@@ -76,7 +76,7 @@ export function ForecastSettings({ widget, disabled, onChange }: {
         <option value="F">Fahrenheit (°F)</option><option value="C">Celsius (°C)</option>
       </select>
     </label>
-    <small className="dd-hint">Forecast by <a href="https://open-meteo.com/" target="_blank" rel="noreferrer">Open-Meteo</a>.
-      {" "}Place names by <a href="https://www.geonames.org/" target="_blank" rel="noreferrer">GeoNames</a>.</small>
+    <small className="dd-hint">Forecast by <a href="https://www.7timer.info/" target="_blank" rel="noreferrer">7Timer!</a>.
+      {" "}City search by <a href="https://open-meteo.com/" target="_blank" rel="noreferrer">Open-Meteo</a> and <a href="https://www.geonames.org/" target="_blank" rel="noreferrer">GeoNames</a>.</small>
   </div>;
 }

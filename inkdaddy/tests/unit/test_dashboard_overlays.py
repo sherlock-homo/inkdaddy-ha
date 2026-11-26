@@ -404,7 +404,7 @@ def test_resized_photo_overlays_restore_both_new_and_historical_geometry():
 
 
 def test_retired_starter_clock_becomes_date_only_when_still_present(catalog):
-    from inkdaddy_hub.services.dashboard import HISTORICAL_SAMPLE_DASHBOARD, load_dashboard_yaml
+    from inkdaddy_hub.services.dashboard import DEV25_SAMPLE_DASHBOARD, HISTORICAL_SAMPLE_DASHBOARD, load_dashboard_yaml
 
     saved = load_dashboard_yaml(HISTORICAL_SAMPLE_DASHBOARD)
     saved["name"] = "My saved dashboard"
@@ -415,7 +415,7 @@ def test_retired_starter_clock_becomes_date_only_when_still_present(catalog):
         db.add(record)
     with catalog() as db:
         current = dashboards.get_dashboard("saved", db)
-        starter_date, = [w for w in dashboard_config(None)["widgets"] if w["source"] == {"type": "date"}]
+        starter_date, = [w for w in load_dashboard_yaml(DEV25_SAMPLE_DASHBOARD)["widgets"] if w["source"] == {"type": "date"}]
         assert (starter_date["x"], starter_date["y"], starter_date["w"], starter_date["h"]) == (0, 0, 2, 1)
         assert current["config"]["widgets"] == [*saved["widgets"][1:], starter_date]
         assert json.loads(current["yaml"])["widgets"] == current["config"]["widgets"]
