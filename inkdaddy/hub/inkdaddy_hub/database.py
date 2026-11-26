@@ -36,7 +36,9 @@ def init_db() -> None:
         Base.metadata.create_all(bind=connection)
         schema = inspect(connection)
         migrations = {
-            "photos": {"framing_json": "TEXT"},
+            "photos": {"framing_json": "TEXT", "place_lookup": "VARCHAR(16)",
+                       "place_key": "VARCHAR(64)", "place_label": "VARCHAR(180)", "place_retry_at": "TIMESTAMP",
+                       "place_attempts": "INTEGER"},
             "devices": {"overlay_dashboard_id": "VARCHAR(128)", "interlace_dashboard_id": "VARCHAR(128)"},
             "ha_entity_cache": {"source_reported_at": "TIMESTAMP"},
             "playback": {

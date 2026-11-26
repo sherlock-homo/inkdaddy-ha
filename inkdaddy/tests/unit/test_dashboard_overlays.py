@@ -163,9 +163,9 @@ def test_photo_overlay_assignment_preview_and_removal(catalog, monkeypatch, tmp_
 
 
 @pytest.mark.parametrize(("has_date", "location", "expected"), [
-    (True, "Example city", ("Nov 22, 2025 · 1 year ago", "Example city")),
-    (True, "", ("Nov 22, 2025 · 1 year ago", "")),
-    (False, "Example city", ("Example city", "")),
+    (True, "Example city", ("Nov 22, 2025", "1 year ago", "Example city")),
+    (True, "", ("Nov 22, 2025", "1 year ago", "")),
+    (False, "Example city", ("", "", "Example city")),
     (False, "", None),
 ])
 def test_photo_details_caption_uses_only_available_fields(catalog, monkeypatch, has_date, location, expected):
@@ -181,13 +181,44 @@ def test_photo_details_caption_uses_only_available_fields(catalog, monkeypatch, 
             assert overlay is None
             return
         widget, = overlay.widgets
-        assert (widget.value, widget.detail) == expected
+        assert (widget.taken, widget.age, widget.location) == expected
         base = Image.new("RGB", (800, 480), "black")
         painted = overlay.render(base)
         left, top, right, bottom = painted.getbbox()
         assert 15 <= left < right <= 400 and 395 <= top < bottom <= 464
+        from inkdaddy_hub.services.palette import WAVESHARE_7COLOR_6, raw_photo_frame
+
+        palette = WAVESHARE_7COLOR_6
+        raw, _ = raw_photo_frame(painted)
+        codes = {n for byte in raw for n in (byte >> 4, byte & 15)}
+        colors = set(painted.getdata())
+        for field, index in ((widget.taken, 5), (widget.age, 4), (widget.location, 2)):
+            assert (palette.colors[index] in colors) == bool(field)
+            assert (palette.packed_values[index] in codes) == bool(field)
         restored = dashboard_content.PhotoOverlay.from_snapshot(overlay.snapshot)
         assert restored.render(base).tobytes() == painted.tobytes()
+
+
+def test_photo_details_wraps_a_long_place_and_restores_legacy_caption():
+    from inkdaddy_hub.services.dashboard_content import PhotoDetailsCaption, PhotoOverlay
+
+    base = Image.new("RGB", (800, 480), "black")
+    config = {"widgets": [{"x": 0, "y": 1, "w": 2}]}
+    caption = PhotoDetailsCaption("Nov 22, 2025", "1 year ago", "Botanical Garden Conservatory, Example City, Example State")
+    wrapped = PhotoOverlay(config, [caption]).render(base)
+    green = (0, 180, 0)
+    assert green in wrapped.crop((17, 407, 395, 428)).getdata()
+    assert green in wrapped.crop((17, 436, 395, 460)).getdata()
+    assert wrapped.crop((396, 0, 800, 480)).getbbox() is None
+
+    old = [{"x": 0, "y": 1, "w": 2, "agenda": False, "caption": True,
+            "text": {"label": "", "value": "Nov 22, 2025 · 1 year ago", "detail": "Example City"}}]
+    restored = PhotoOverlay.from_snapshot(old)
+    assert restored.snapshot == old
+    original = restored.render(base)
+    assert original.getpixel((42, 402)) == (238, 238, 238)
+    assert len({r for r, _, _ in original.getdata()}) > 2
+    assert all(r == g == b for r, g, b in original.getdata())
 
 
 def test_date_overlay_snapshot_tracks_rendered_text_and_preserves_photo(catalog):

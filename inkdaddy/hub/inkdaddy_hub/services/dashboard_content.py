@@ -55,20 +55,27 @@ class ForecastText(WidgetText):
 
 
 class PhotoCaption(WidgetText):
-    """Compact one- or two-line caption on a photo."""
+    """Original monochrome caption, retained for replaying previously offered frames."""
+
+
+@dataclass(frozen=True)
+class PhotoDetailsCaption:
+    taken: str
+    age: str
+    location: str
 
 
 @dataclass(frozen=True)
 class PhotoOverlay:
     config: dict[str, Any]
-    widgets: list[WidgetText]
+    widgets: list[WidgetText | PhotoDetailsCaption]
 
     @property
     def snapshot(self) -> list[dict[str, Any]]:
         return [
             {"x": tile["x"], "y": tile["y"], "w": tile["w"],
              "agenda": isinstance(widget, AgendaText), "text": asdict(widget),
-             **({"caption": True} if isinstance(widget, PhotoCaption) else {}),
+             **({"caption": True} if isinstance(widget, (PhotoCaption, PhotoDetailsCaption)) else {}),
              **({"forecast": True, "accent": tile.get("accent", self.config.get("theme", {}).get("accent", "yellow"))}
                 if isinstance(widget, ForecastText) else {}),
              **({"h": 2} if tile.get("h") == 2 else {})}
@@ -77,14 +84,15 @@ class PhotoOverlay:
 
     @classmethod
     def from_snapshot(cls, snapshot: list[dict[str, Any]]) -> PhotoOverlay:
-        widgets: list[WidgetText] = []
+        widgets: list[WidgetText | PhotoDetailsCaption] = []
         for tile in snapshot:
             if tile.get("forecast"):
                 fields = tile["text"]
                 days = tuple(ForecastDay(**item) for item in fields["days"])
                 widgets.append(ForecastText(**{**fields, "days": days}))
             elif tile.get("caption"):
-                widgets.append(PhotoCaption(**tile["text"]))
+                fields = tile["text"]
+                widgets.append(PhotoDetailsCaption(**fields) if "taken" in fields else PhotoCaption(**fields))
             elif tile["agenda"]:
                 widgets.append(AgendaText(**tile["text"]))
             else:
@@ -97,6 +105,11 @@ class PhotoOverlay:
         for tile, widget in zip(self.config["widgets"], self.widgets, strict=True):
             x = 17 + tile["x"] * 194
             w = tile["w"] * 194 - 10
+            if isinstance(widget, PhotoDetailsCaption):
+                from .dashboard_art import draw_photo_caption
+
+                draw_photo_caption(overlay, x, w, widget.taken, widget.age, widget.location)
+                continue
             if isinstance(widget, PhotoCaption):
                 width = min(w, 26 + round(max(draw.textlength(widget.value, font=_font(22)),
                                                draw.textlength(widget.detail, font=_font(18)))))
@@ -238,14 +251,15 @@ def resolve_photo_overlay(
         if photo is None:
             return None
         details = capture_details(get_settings().data_dir, photo.original_path, want_date=True, want_location=True)
+        details = details.with_cached_place(photo.place_label)
         if not details.taken and not details.location:
             return None
         if details.taken:
             _, local = _site_context(db, timestamp)
             age = photo_age(details.taken, local.date())
-            caption = PhotoCaption("", f"{details.taken:%b %d, %Y} · {age}", details.location)
+            caption = PhotoDetailsCaption(f"{details.taken:%b %d, %Y}", age, details.location)
         else:
-            caption = PhotoCaption("", details.location)
+            caption = PhotoDetailsCaption("", "", details.location)
         return PhotoOverlay({"widgets": [{"x": 0, "y": 1, "w": 2}]}, [caption])
     record = get_dashboard_record(db, overlay_id)
     if record is None and overlay_id != "sample":
@@ -291,6 +305,8 @@ def resolve_widget_text(
             details = capture_details(get_settings().data_dir, photo.original_path,
                                       want_date="date_taken" in fields or "years_ago" in fields,
                                       want_location="location" in fields)
+            if render_version == "current":
+                details = details.with_cached_place(photo.place_label)
     for widget in config["widgets"]:
         options = widget["options"]
         source = widget["source"]

@@ -48,3 +48,8 @@
     grid-template-columns: minmax(0, 1fr);
   }
 }
+
+.photo-places summary { cursor: pointer; font-weight: 600; }
+.photo-places[open] summary { margin-bottom: .75rem; }
+.photo-places .photo-places-auto { display: flex; align-items: center; gap: .5rem; }
+.photo-places-auto input[type="checkbox"] { width: auto; min-height: auto; }

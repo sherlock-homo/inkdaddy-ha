@@ -184,7 +184,7 @@ def test_photo_overlay_repairs_exact_offered_bytes_after_photo_and_layout_edits(
     if overlay_id == "@photo-details":
         tile, = json.loads(due.photo_render_json)["overlay"]
         assert tile["caption"] is True
-        assert tile["text"] == {"label": "", "value": "Nov 18, 2026 · Today", "detail": "Fixture city"}
+        assert tile["text"] == {"taken": "Nov 18, 2026", "age": "Today", "location": "Fixture city"}
         refresh_playback_slots(db, device, now=NOW)
         upcoming = db.scalars(select(PlaybackSlot).where(PlaybackSlot.scheduled_second > due.scheduled_second)).all()
         assert len(upcoming) == playback.UPCOMING_SLOTS

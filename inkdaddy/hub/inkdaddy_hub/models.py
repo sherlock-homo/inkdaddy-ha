@@ -103,6 +103,11 @@ class Photo(Base, TimestampMixin):
     checksum: Mapped[str | None] = mapped_column(String(128))
     processed_status: Mapped[str] = mapped_column(String(64), default="pending", nullable=False)
     framing_json: Mapped[str | None] = mapped_column(Text)
+    place_lookup: Mapped[str | None] = mapped_column(String(16))
+    place_key: Mapped[str | None] = mapped_column(String(64))
+    place_label: Mapped[str | None] = mapped_column(String(180))
+    place_retry_at: Mapped[datetime | None] = mapped_column(DateTime)
+    place_attempts: Mapped[int | None] = mapped_column(Integer)
 
 
 class PhotoRevision(Base, TimestampMixin):

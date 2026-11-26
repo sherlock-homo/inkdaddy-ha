@@ -72,6 +72,38 @@ def _drawing(image: Image.Image) -> ImageDraw.ImageDraw:
     return draw
 
 
+def draw_photo_caption(image: Image.Image, x: int, width: int, taken: str, age: str, location: str) -> None:
+    """Draw metadata directly in panel inks so thin lettering survives photo dithering."""
+    draw = _drawing(image)
+    title_font = _font(22, 700)
+    place_font = _font(18, 650)
+    padding = 12
+    max_line = width - 2 * padding
+    gap = 16
+    # Keep the date and elapsed time together, and wrap a long venue or address below.
+    first_width = round(title_font.getlength(taken) + title_font.getlength(age)) + (gap if taken and age else 0)
+    places = [location] if location else []
+    if location and place_font.getlength(location) > max_line:
+        words = location.split()
+        for index in range(1, len(words)):
+            if place_font.getlength(" ".join(words[:index + 1])) > max_line:
+                places = [" ".join(words[:index]), " ".join(words[index:])]
+                break
+    text_width = min(max_line, max([first_width] + [round(place_font.getlength(line)) for line in places]))
+    row_heights = (28 if taken or age else 0) + 22 * len(places)
+    y = 462 - row_heights - 13
+    draw.rounded_rectangle((x, y, x + text_width + 2 * padding, 462), radius=8, fill=BLACK, outline=WHITE, width=1)
+    left, top = x + padding, y + 7
+    if taken or age:
+        draw.text((left, top), taken, fill=YELLOW, font=title_font, anchor="lt")
+        age_x = left + round(title_font.getlength(taken)) + (gap if taken and age else 0)
+        draw.text((age_x, top), age, fill=RED, font=title_font, anchor="lt")
+        top += 28
+    for line in places:
+        _text(draw, line, left, top, text_width, 18, GREEN, weight=650)
+        top += 22
+
+
 def _paste_symbol(tile: Image.Image, condition: str, left: int, top: int, size: int) -> None:
     symbol = weather_symbol(condition).resize((size, size), Image.Resampling.NEAREST)
     tile.paste(symbol, (left, top), symbol)

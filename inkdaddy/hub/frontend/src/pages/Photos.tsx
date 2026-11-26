@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useRef, useState, type FormEvent } from "react";
 import { apiJson, apiPath } from "../lib/api";
 import type { AlbumRecord, PhotoRecord, PlaybackSource } from "../lib/types";
+import { PhotoPlaces } from "./PhotoPlaces";
 import { PhotoFramingEditor, type FramingPhoto } from "./PhotoFramingEditor";
 import { FramingOptions, type Framing } from "./SimplePages";
 import "./photos.css";
@@ -199,6 +200,7 @@ export function PhotosPage({ onAddToPlaylist }: { onAddToPlaylist: (source: Play
             }} />
         </label>
       </div>
+      <PhotoPlaces />
       {(message || uploading) && <p role="status">{uploading ? "Processing photos…" : message}</p>}
       {uploadErrors.length > 0 && <div role="alert">
         <strong>{uploadErrors.length} {uploadErrors.length === 1 ? "photo could" : "photos could"} not be added</strong>

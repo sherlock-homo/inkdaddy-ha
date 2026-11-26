@@ -1,5 +1,12 @@
 # inkDaddy Home Assistant repository checklist
 
+## Photo caption colors and place names
+
+- [x] Render the capture date, elapsed time and location in three distinguishable inks. Preserve older frame receipts.
+- [x] Resolve coordinate-only photos to reliable place labels and cache results for existing and future photos.
+- [x] Make location lookup controls and data use clear in Photos.
+- [ ] Check caption previews, existing photo upgrades and delivery on the paired frame.
+
 ## Simpler app navigation
 
 - [x] Gather playback, photos, dashboards, integrations, devices and settings into six main tabs with working links to the moved tools.

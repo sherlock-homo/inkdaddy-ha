@@ -1,3 +1,8 @@
+## 0.2.0-dev.28
+
+- Photo details use separate inks for the capture date, elapsed time and location.
+- Find place names for GPS-tagged photos under **Photos → Photo locations**. Run a one-time lookup on the library or turn on automatic lookup for new uploads.
+
 ## 0.2.0-dev.27
 
 - Six main tabs group related tools. Connect a display under **Devices**, manage Home Assistant under **Integrations**, and find updates and diagnostics under **Settings**.

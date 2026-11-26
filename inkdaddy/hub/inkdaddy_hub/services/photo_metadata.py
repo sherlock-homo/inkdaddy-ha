@@ -7,7 +7,7 @@ import re
 import struct
 import warnings
 import zlib
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import date
 from functools import lru_cache
 from os import fstat
@@ -30,6 +30,11 @@ _IPTC = "{http://iptc.org/std/Iptc4xmpExt/2008-02-29/}"
 class CaptureDetails:
     taken: date | None = None
     location: str = ""
+    coordinates: tuple[float, float] | None = None
+    accuracy_m: float | None = None
+
+    def with_cached_place(self, label: str | None) -> CaptureDetails:
+        return replace(self, location=label) if self.coordinates is not None and label else self
 
 
 def _png_xmp(payload: bytes) -> bytes:
@@ -139,7 +144,7 @@ def _created_place(xmp: bytes) -> str:
             value = node.text if node.tag == tag else node.get(tag)
             if label := _label(value):
                 fields.setdefault(field, label)
-    parts = [fields.get("City") or fields.get("Sublocation"), fields.get("ProvinceState"), fields.get("CountryName")]
+    parts = [fields.get("Sublocation"), fields.get("City"), fields.get("ProvinceState"), fields.get("CountryName")]
     return ", ".join(dict.fromkeys(part for part in parts if part))[:100]
 
 
@@ -159,17 +164,17 @@ def _gps_area(gps: dict, endian: str | None) -> str:
     return _label(value)
 
 
-def _coordinate(value: object, ref: object, directions: tuple[str, str], limit: int) -> str:
+def _coordinate(value: object, ref: object, directions: tuple[str, str], limit: int) -> float | None:
     if not isinstance(value, (tuple, list)) or len(value) != 3 or ref not in directions:
-        return ""
+        return None
     try:
         degrees, minutes, seconds = map(float, value)
         result = degrees + minutes / 60 + seconds / 3600
         if not (0 <= degrees and 0 <= minutes < 60 and 0 <= seconds < 60 and math.isfinite(result) and result <= limit):
-            return ""
-        return f"{result:.2f}° {ref}"
+            return None
+        return -result if ref == directions[1] else result
     except (TypeError, ValueError, ArithmeticError):
-        return ""
+        return None
 
 
 def _capture_date(value: object) -> date | None:
@@ -207,6 +212,8 @@ def _cached_details(
         raw, xmp = _metadata_blocks(asset, stat.st_size, want_location=want_location)
     place = _created_place(xmp) if want_location else ""
     taken = None
+    coordinates = None
+    accuracy = None
     # Damaged optional tags should leave a usable picture. Pillow reports some malformed
     # TIFF fields as warnings and omits them, so avoid logging private metadata.
     with warnings.catch_warnings():
@@ -223,11 +230,15 @@ def _cached_details(
                 if not place:
                     lat = _coordinate(gps.get(2), gps.get(1), ("N", "S"), 90)
                     lon = _coordinate(gps.get(4), gps.get(3), ("E", "W"), 180)
-                    if lat and lon:
-                        place = f"{lat}, {lon}"
+                    if lat is not None and lon is not None:
+                        coordinates = (lat, lon)
+                        place = f"{abs(lat):.2f}° {gps.get(1)}, {abs(lon):.2f}° {gps.get(3)}"
+                        if 31 in gps:  # EXIF GPSHPositioningError, metres
+                            accuracy = math.inf
+                            accuracy = float(gps[31])
         except (OSError, ValueError, TypeError, KeyError, IndexError, ArithmeticError, struct.error, SyntaxError, AttributeError):
             pass
-    return CaptureDetails(taken, place)
+    return CaptureDetails(taken, place, coordinates, accuracy)
 
 
 def photo_age(taken: date, rendered: date) -> str:

@@ -30,9 +30,10 @@ def details(path, want_date=True, want_location=True):
 @pytest.mark.parametrize("ext", ["jpg", "png", "webp"])
 def test_capture_from_managed_original_and_only_requested_fields(tmp_path, ext):
     path = original(tmp_path, ext, exif=photo_tags())
-    assert details(path) == metadata.CaptureDetails(date(2012, 3, 9), "20.08° N, 45.15° W")
+    point = (20 + 5 / 60, -(45 + 9 / 60 + 10 / 3600))
+    assert details(path) == metadata.CaptureDetails(date(2012, 3, 9), "20.08° N, 45.15° W", point)
     assert details(path, want_location=False) == metadata.CaptureDetails(date(2012, 3, 9))
-    assert details(path, want_date=False) == metadata.CaptureDetails(location="20.08° N, 45.15° W")
+    assert details(path, want_date=False) == metadata.CaptureDetails(location="20.08° N, 45.15° W", coordinates=point)
 
 
 XMP = """<metadata xmlns:i="http://iptc.org/std/Iptc4xmpExt/2008-02-29/">

@@ -142,6 +142,12 @@ def create_photo_from_bytes(
             processed_status="ready",
             framing_json=json.dumps(asdict(framing)),
         )
+        from .photo_places import auto_enabled
+        from .playback import begin_playback_write
+
+        begin_playback_write(db)
+        if auto_enabled(db):
+            photo.place_lookup = "auto"
         db.add(photo)
         db.commit()
     except Exception as error:

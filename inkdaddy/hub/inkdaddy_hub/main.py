@@ -16,12 +16,13 @@ except ModuleNotFoundError as exc:  # pragma: no cover - dependency bootstrap pa
         '`pip install -e ".[dev]"` from the repository root.'
     ) from exc
 
-from .api import dashboards, devices, diagnostics, health, home_assistant, integration_requests, integrations, matter_frames, photos, setup, settings, simulator, updates
+from .api import dashboards, devices, diagnostics, health, home_assistant, integration_requests, integrations, matter_frames, photo_places, photos, setup, settings, simulator, updates
 from .config import get_settings
 from .database import init_db
 from .services.home_assistant import supervisor_connection
 from .services.integration_requests import relay_config, run_integration_requests
 from .services.matter_controller import get_controller
+from .services.photo_places import run_photo_places
 from .services.udp_frame_transfer import start_udp_frame_transfer_listener
 from .services.udp_heartbeat import start_udp_heartbeat_listener
 
@@ -31,13 +32,10 @@ async def lifespan(_app: FastAPI):
     controller = get_controller()
     managed = supervisor_connection() is not None
     relay_enabled = relay_config()[1] is not None
-    if not managed and controller is None and not relay_enabled:
-        yield
-        return
 
     stop_event = threading.Event()
     async def run_workers() -> None:
-        workers = []
+        workers = [asyncio.to_thread(run_photo_places, stop_event)]
         if managed:
             from .worker import refresh_home_assistant, run
 
@@ -86,6 +84,7 @@ def create_app() -> FastAPI:
     app.include_router(home_assistant.router)
     app.include_router(matter_frames.router)
     app.include_router(dashboards.router)
+    app.include_router(photo_places.router)
     app.include_router(photos.router)
     app.include_router(devices.router)
     app.include_router(simulator.router)
