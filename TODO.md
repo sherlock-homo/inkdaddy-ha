@@ -6,7 +6,10 @@
 - [x] Arrange Date, Current weather and Battery across the top and expand the seven-day forecast across the bottom.
 - [x] Remove the provider footer from the forecast and keep the data source identifiable in its settings.
 - [x] Preserve customized dashboards and existing frame receipts when upgrading.
-- [ ] Check the packaged app, deploy it and verify the dashboard offered to the paired frame.
+- [x] Check the packaged app, deploy it and verify the dashboard offered to the paired frame.
+- [ ] Confirm the full-screen dashboard on the paired frame after the Thread transfer succeeds.
+
+Dev.29 passed 320 Python tests and six controller tests on the Mac and in the HA package. Desktop Chrome and mobile WebKit both verified resizing and saved layouts. The installed app generated the full 800 × 480 panel image with seven forecast days.
 
 ## Photo caption colors and place names
 
