@@ -5,7 +5,10 @@
 - [x] Render the capture date, elapsed time and location in three distinguishable inks. Preserve older frame receipts.
 - [x] Resolve coordinate-only photos to reliable place labels and cache results for existing and future photos.
 - [x] Make location lookup controls and data use clear in Photos.
-- [ ] Check caption previews, existing photo upgrades and delivery on the paired frame.
+- [x] Verify the caption colors in the outgoing panel image and upgrade the installed Home Assistant app.
+- [ ] Confirm a colored, resolved photo on the paired frame after the interrupted Thread transfers.
+
+Dev.28 passed 314 Python tests and six controller tests locally and in the app package. Desktop Chrome and mobile WebKit verified both lookup controls. The existing library lookup completed and original-file hashes matched before and after.
 
 ## Simpler app navigation
 
